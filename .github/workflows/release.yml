@@ -38,10 +38,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+        # API GitHub інколи відповідає 502 — пробуємо до 4 разів з паузою. Після збою реліз може
+        # лишитися чернеткою (gh спершу створює чернетку, потім публікує) — тоді знімаємо її.
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/KolySvitlo.exe --clobber
-          else
-            gh release create "$TAG" dist/KolySvitlo.exe \
-              --title "Коли світло? $TAG" --notes-file .github/release-notes.md
-          fi
+          publish() {
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" dist/KolySvitlo.exe --clobber &&
+                gh release edit "$TAG" --draft=false
+            else
+              gh release create "$TAG" dist/KolySvitlo.exe \
+                --title "Коли світло? $TAG" --notes-file .github/release-notes.md
+            fi
+          }
+          for attempt in 1 2 3 4; do
+            publish && exit 0
+            echo "Спроба $attempt не вдалася, повтор за $((attempt * 20)) с"
+            sleep $((attempt * 20))
+          done
+          exit 1
