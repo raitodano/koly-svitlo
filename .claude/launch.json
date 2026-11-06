@@ -6,6 +6,12 @@
       "runtimeExecutable": "py",
       "runtimeArgs": ["-X", "utf8", "server.py"],
       "port": 8765
+    },
+    {
+      "name": "static-site",
+      "runtimeExecutable": "py",
+      "runtimeArgs": ["-m", "http.server", "8766", "-d", "site"],
+      "port": 8766
     }
   ]
 }

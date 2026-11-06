@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 cache/
 .venv/
+build/
+dist/
+site/
+*.spec
+build.log
+tools/icon.ico

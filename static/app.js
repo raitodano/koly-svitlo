@@ -2,6 +2,11 @@
 
 /* Пошук черги ГПВ за адресою. Дані — /api/data (див. server.py, dpem.py). */
 
+// Статична версія (GitHub Pages) підставляє window.GPV_DATA_URL = 'data.json',
+// яку раз на кілька хвилин оновлює GitHub Actions; локальний сервер віддає /api/data.
+const DATA_URL = window.GPV_DATA_URL || '/api/data';
+const STATIC_MODE = Boolean(window.GPV_DATA_URL);
+const STALE_AFTER_MIN = 90;
 const TZ = 'Europe/Kyiv';
 const SLOTS = 48;
 const REFRESH_MS = 5 * 60 * 1000;
@@ -435,9 +440,13 @@ function renderMeta() {
   if (d.fetched_at) parts.push(`дані отримано ${t(d.fetched_at)}`);
   $('#meta').innerHTML = `${esc(parts.join(' · '))} · <button type="button" id="refresh">оновити</button>`;
   const n = $('#notice');
+  const ageMin = d.fetched_at ? (Date.now() - Date.parse(d.fetched_at)) / 60000 : 0;
   if (d.stale && d.error) {
     n.hidden = false;
     n.innerHTML = `Не вдалося оновити дані з сайту ДПЕМ — показано збережену копію. <button type="button" id="retry">Спробувати ще</button>`;
+  } else if (ageMin > STALE_AFTER_MIN) {
+    n.hidden = false;
+    n.innerHTML = `Дані могли застаріти: останнє оновлення ${esc(t(d.fetched_at))}. Звірте з <a href="https://info.dpem.mk.ua/off_graf.html" target="_blank" rel="noopener">сайтом ДПЕМ</a>.`;
   } else n.hidden = true;
 }
 
@@ -470,7 +479,8 @@ function tick() {
 async function load(force = false) {
   if (!state.data) $('#results').innerHTML = '<div class="skeleton"></div>';
   try {
-    const r = await fetch(`/api/data${force ? '?refresh=1' : ''}`, { cache: 'no-store' });
+    const url = STATIC_MODE ? `${DATA_URL}?t=${Date.now()}` : `${DATA_URL}${force ? '?refresh=1' : ''}`;
+    const r = await fetch(url, { cache: 'no-store' });
     const d = await r.json();
     if (!r.ok || !d.schedules) throw new Error(d.error || `HTTP ${r.status}`);
     const firstLoad = !state.data;

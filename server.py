@@ -1,24 +1,34 @@
 """Невеликий веб-сервер: віддає сторінку пошуку і /api/data з розібраними графіками.
 
-Запуск:  py server.py            (порт 8765, або змінна оточення PORT)
+Запуск:  py server.py [--lan] [--open] [--port 8765]
+  --lan   слухати всю локальну мережу (щоб заходити з телефона по Wi-Fi)
+  --open  відкрити сторінку в браузері після запуску
+Зібраний KolySvitlo.exe поводиться як `server.py --lan --open`.
 """
 from __future__ import annotations
 
+import argparse
 import functools
 import json
 import os
+import socket
 import sys
 import threading
 import time
+import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+FROZEN = getattr(sys, "frozen", False)  # запущено як .exe (PyInstaller)
+# ресурси (static/) — всередині exe; кеш — поруч з exe, щоб переживав перезапуск
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
+
+sys.path.insert(0, str(BUNDLE_DIR))
 import dpem  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent
-STATIC_DIR = ROOT / "static"
+STATIC_DIR = BUNDLE_DIR / "static"
 CACHE_FILE = ROOT / "cache" / "last.json"
 CACHE_TTL = int(os.environ.get("CACHE_TTL", "300"))   # як часто перечитувати сайт, сек
 FORCE_MIN_INTERVAL = 30                               # не частіше при ?refresh=1
@@ -104,13 +114,79 @@ class Handler(SimpleHTTPRequestHandler):
             super().log_message(fmt, *args)
 
 
+class Server(ThreadingHTTPServer):
+    # На Windows SO_REUSEADDR дозволяє двом серверам «сісти» на один порт — вимикаємо,
+    # щоб зайнятий порт давав помилку і ми брали наступний.
+    allow_reuse_address = os.name != "nt"
+    daemon_threads = True
+
+
+def _is_private(ip: str) -> bool:
+    a, b = (int(x) for x in ip.split(".")[:2])
+    return a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31)
+
+
+def lan_addresses() -> list[str]:
+    """IP цього комп'ютера в локальній мережі (основний — першим)."""
+    ips: list[str] = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 80))  # UDP connect нічого не надсилає, лише обирає інтерфейс
+            ips.append(s.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            if info[4][0] not in ips:
+                ips.append(info[4][0])
+    except OSError:
+        pass
+    return [ip for ip in ips if _is_private(ip)]
+
+
+def _warm_cache() -> None:
+    try:
+        CACHE.get()
+    except Exception as e:  # повідомлення вже надруковано в DataCache.get
+        print(f"[!] Поки немає даних: {e}", file=sys.stderr)
+
+
 def main() -> None:
-    port = int(os.environ.get("PORT", "8765"))
-    host = os.environ.get("HOST", "127.0.0.1")
+    ap = argparse.ArgumentParser(description="Коли світло? — пошук черги ГПВ за адресою")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8765")))
+    ap.add_argument("--lan", dest="lan", action="store_true", default=FROZEN,
+                    help="доступ з інших пристроїв у локальній мережі (за замовчуванням для exe)")
+    ap.add_argument("--local-only", dest="lan", action="store_false", help="лише з цього комп'ютера")
+    ap.add_argument("--open", dest="open", action="store_true", default=FROZEN,
+                    help="відкрити браузер після запуску (за замовчуванням для exe)")
+    ap.add_argument("--no-browser", dest="open", action="store_false")
+    args = ap.parse_args()
+
+    host = os.environ.get("HOST") or ("0.0.0.0" if args.lan else "127.0.0.1")
     handler = functools.partial(Handler, directory=str(STATIC_DIR))
-    httpd = ThreadingHTTPServer((host, port), handler)
-    print(f"Пошук черги ГПВ: http://{'localhost' if host in ('127.0.0.1', '0.0.0.0') else host}:{port}")
-    threading.Thread(target=lambda: CACHE.get(), daemon=True).start()  # прогріти кеш
+    httpd = None
+    for port in range(args.port, args.port + 20):
+        try:
+            httpd = Server((host, port), handler)
+            break
+        except OSError:
+            continue
+    if httpd is None:
+        print(f"Не вдалося зайняти жоден порт {args.port}–{args.port + 19}.", file=sys.stderr)
+        sys.exit(1)
+
+    local_url = f"http://localhost:{port}"
+    print("Коли світло? — пошук черги ГПВ за адресою\n")
+    print(f"  На цьому комп'ютері:   {local_url}")
+    if host == "0.0.0.0":
+        for i, ip in enumerate(lan_addresses()):
+            label = "З телефона (та сама Wi-Fi мережа):" if i == 0 else "                       або:"
+            print(f"  {label} http://{ip}:{port}")
+    print("\nЩоб зупинити — закрийте це вікно або натисніть Ctrl+C.\n")
+
+    threading.Thread(target=_warm_cache, daemon=True).start()
+    if args.open:
+        threading.Timer(0.8, webbrowser.open, args=(local_url,)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
