@@ -6,22 +6,42 @@
 
 const DATA_URL = window.GPV_DATA_URL || '/api/data';
 const STATIC_MODE = Boolean(window.GPV_DATA_URL);
+const SOURCE_URL = 'https://info.dpem.mk.ua/off_graf.html';
+/* Сайт ДПЕМ не дозволяє сторінкам з інших доменів читати себе (немає CORS-заголовків),
+   тому статична версія звіряє графік через публічний сервіс r.jina.ai — він завантажує
+   ту саму сторінку ДПЕМ і віддає її з дозволом для браузера. Береться лише масив графіка. */
+const LIVE_URL = `https://r.jina.ai/${SOURCE_URL}`;
+const LIVE_TIMEOUT_MS = 40 * 1000;
+const AUTO_VERIFY_AFTER_MIN = 40;  // копія старша — звіряємо самі під час відкриття
 const STALE_AFTER_MIN = 90;
 const TZ = 'Europe/Kyiv';
 const SLOTS = 48;
+const SUBQUEUES = ['1-І', '1-ІІ', '2-І', '2-ІІ', '3-І', '3-ІІ', '4-І', '4-ІІ', '5-І', '5-ІІ', '6-І', '6-ІІ'];
 const REFRESH_MS = 5 * 60 * 1000;
 const MAX_CARDS = 30;
 const MINE_KEY = 'gpv.mine';
+const HIST_KEY = 'gpv.hist';
+const LIVE_KEY = 'gpv.live';
+const HIST_MAX = 25;
+const HIST_IDLE_MS = 2500;
 const STATE_LABEL = {
   0: 'світло є', 1: 'перемикання (вимкнення)', 2: 'світла немає',
   3: 'перемикання (увімкнення)', 4: 'можливе відключення',
+};
+const SWITCH_LABEL = {
+  'дист.': ['перемикання дистанційне', 'вмикають і вимикають з диспетчерського пункту'],
+  'місц.': ['перемикання місцеве', 'вмикає й вимикає бригада на підстанції — можлива затримка'],
 };
 const EXAMPLES = ['Шев 10', 'Незалежності 20', 'Європейська 5А', 'Молодіжна 7', 'Степова', 'Костянтинівка Шевченка'];
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const state = { data: null, index: [], date: null, query: '', order: {}, cards: [], mine: loadMine(), addOpen: false };
+const state = {
+  data: null, index: [], best: new Map(), date: null, query: '', order: {}, cards: [], lastRes: null,
+  mine: loadMine(), hist: loadHist(), live: loadLive(), addOpen: false, openQ: new Set(), focusId: null,
+  verifying: false, vres: null, lastAutoVerify: 0, lastCommit: null,
+};
 
 /* ===================== нормалізація тексту ===================== */
 
@@ -34,8 +54,8 @@ function fold(s) {
 function words(s) { return fold(s).match(/[а-яa-z0-9]+/g) || []; }
 
 const STOP = new Set(['вул', 'вулиця', 'ул', 'улица', 'бул', 'бульв', 'бульвар', 'бр', 'пр', 'прт', 'пркт', 'просп',
-  'проспект', 'пров', 'провулок', 'пер', 'переулок', 'пл', 'площа', 'площадь', 'туп', 'тупик', 'мкр', 'смт', 'село',
-  'місто', 'город', 'буд', 'будинок', 'дом', 'кв', 'квартира', 'номер'].map(fold));
+  'проспект', 'пров', 'провулок', 'пер', 'переулок', 'пл', 'площа', 'площадь', 'туп', 'тупик', 'мкр', 'мікрорайон',
+  'смт', 'село', 'місто', 'город', 'буд', 'будинок', 'дом', 'кв', 'квартира', 'номер'].map(fold));
 
 /* Російські основи → українські (людина може писати російською). */
 const SYN = [
@@ -63,6 +83,35 @@ function normHouse(s) {
 const houseBase = (h) => (h.match(/^\d+/) || [''])[0];
 
 function streetKey(name) { return words(name).map((w) => w.slice(0, 5)).join(' '); }
+
+/* ===================== повні назви (без скорочень) ===================== */
+
+const TYPE_FULL = {
+  'вул.': 'вулиця', 'б-р': 'бульвар', 'пр-т': 'проспект', 'пров.': 'провулок', 'пл.': 'площа',
+  'туп.': 'тупик', 'мкр.': 'мікрорайон',
+  // «пр.» у переліках — і проспект, і провулок; якщо для вулиці ніде немає «пр-т», це провулок
+  'пр.': 'провулок',
+};
+const NAME_FULL = Object.fromEntries([
+  ['Л. Українки', 'Лесі Українки'], ['Я. Мудрого', 'Ярослава Мудрого'],
+].map(([a, b]) => [words(a).join(' '), b]));
+
+/** Найкращий варіант написання: з типом вулиці, без крапок, з великої літери. */
+function nameRank(e) {
+  const caps = (e.name.match(/(^|\s)[А-ЯІЇЄҐA-Z]/g) || []).length;
+  return (e.kind === 'street' ? 4 : 0) + (e.type ? 2 : 0) + (e.type === 'пр.' ? -1 : 0)
+    + (e.name.includes('.') ? -3 : 0) + caps * 0.3 + e.name.length / 100;
+}
+function bestEntry(entries) { return [...entries].sort((a, b) => nameRank(b) - nameRank(a))[0]; }
+
+function fullName(e) {
+  let name = NAME_FULL[words(e.name).join(' ')] || e.name;
+  name = name.replace(/^[а-яіїєґa-z]/, (c) => c.toUpperCase());
+  if (e.kind !== 'street') return name;
+  const t = TYPE_FULL[e.type] ?? e.type;
+  return t ? `${t} ${name}` : name;
+}
+const shortLoc = (loc) => String(loc || '').replace(/^(м|с|смт)\.\s*/, '');
 
 /* ===================== нечітке порівняння слів ===================== */
 
@@ -118,6 +167,16 @@ function buildIndex(data) {
   return idx;
 }
 
+/** Для кожної вулиці — найповніший варіант назви з усіх переліків. */
+function buildBest(index) {
+  const groups = new Map();
+  for (const it of index) {
+    if (!groups.has(it.key)) groups.set(it.key, []);
+    groups.get(it.key).push(it.entry);
+  }
+  return new Map([...groups].map(([k, es]) => [k, bestEntry(es)]));
+}
+
 function parseQuery(text) {
   let house = null, rest = text;
   const m = text.match(/(\d+)(?:\s*[-–]?\s*([a-zа-яєіїґ])(?![a-zа-яєіїґ]))?(?:\s*\/\s*(\d+[a-zа-яєіїґ]?))?(?:\s*[-–]\s*(\d+)(?!\d))?/i);
@@ -151,7 +210,7 @@ function wordsMatch(qw, ws) {
 
 function search(text) {
   const { house, words: qw } = parseQuery(text);
-  if (!qw.length) return { house, words: qw, cards: [], misses: [], noWords: true };
+  if (!qw.length) return { house, words: qw, cards: [], total: 0, misses: [], noWords: true };
 
   const hits = [], locOnly = [], misses = new Map();
   for (const it of state.index) {
@@ -202,32 +261,50 @@ function search(text) {
   return { house, words: qw, cards: cards.slice(0, MAX_CARDS), total: cards.length, misses: missList, locOnly: !hits.length && locOnly.length > 0 };
 }
 
-/** Найкращий варіант написання назви серед збігів (з типом вулиці, без скорочень). */
+/** Найкращий варіант написання назви серед збігів картки (з урахуванням інших переліків). */
 function displayEntry(hits) {
-  const rank = (e) => (e.kind === 'street' ? 2 : 0) + (e.type ? 1 : 0) + (e.name.includes('.') ? -2 : 0) + e.name.length / 100;
-  return hits.map((h) => h.entry).sort((a, b) => rank(b) - rank(a))[0];
+  return state.best.get(hits[0].key) || bestEntry(hits.map((h) => h.entry));
 }
-function cardTitle(g) {
-  const e = displayEntry(g.hits);
-  return `${e.type ? e.type + ' ' : ''}${e.name}`;
-}
+function cardTitle(g) { return fullName(displayEntry(g.hits)); }
 function sortHouses(list) {
   return [...list].sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0) || a.localeCompare(b, 'uk'));
 }
-
-/* ===================== «Мої адреси» (зберігаються в цьому браузері) ===================== */
-
-function loadMine() {
-  try {
-    const v = JSON.parse(localStorage.getItem(MINE_KEY) || '[]');
-    return Array.isArray(v) ? v.filter((m) => m && (m.kind === 'found' || m.kind === 'manual')) : [];
-  } catch { return []; }
+/** Номер для заголовка: як у переліку («54-Б»), але для діапазону «37-39» — той, що шукали. */
+function shownHouse(g, house) {
+  if (!house) return '';
+  return g.level === 'exact' && normHouse(g.matched) === house ? g.matched : house.toUpperCase();
 }
-function saveMine() {
-  try { localStorage.setItem(MINE_KEY, JSON.stringify(state.mine)); } catch { /* приватний режим */ }
+const qidsOf = (g) => [...new Set(g.hits.map((h) => h.qid))].sort((a, b) => state.order[a] - state.order[b]);
+
+/* ===================== збереження в браузері ===================== */
+
+function readJson(key, fallback) {
+  try { const v = JSON.parse(localStorage.getItem(key) || 'null'); return v ?? fallback; } catch { return fallback; }
+}
+function writeJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* приватний режим */ }
 }
 const uid = () => Math.random().toString(36).slice(2, 10);
+
+function loadMine() {
+  const v = readJson(MINE_KEY, []);
+  return Array.isArray(v) ? v.filter((m) => m && (m.kind === 'found' || m.kind === 'manual')) : [];
+}
+const saveMine = () => writeJson(MINE_KEY, state.mine);
 const savedFound = (id) => state.mine.find((m) => m.kind === 'found' && m.id === id);
+
+function loadHist() {
+  const v = readJson(HIST_KEY, []);
+  return Array.isArray(v) ? v.filter((h) => h && h.uid && h.id && h.title && h.q).slice(0, HIST_MAX) : [];
+}
+const saveHist = () => writeJson(HIST_KEY, state.hist);
+
+/** Графіки, звірені напряму з сайтом ДПЕМ (щоб після перезавантаження не повертатись до старішої копії). */
+function loadLive() {
+  const v = readJson(LIVE_KEY, null);
+  if (!v || !Array.isArray(v.schedules) || !v.checked_at) return null;
+  return Date.now() - Date.parse(v.checked_at) < 36 * 3600 * 1000 ? v : null;
+}
 
 /* ===================== час і графік ===================== */
 
@@ -248,6 +325,23 @@ function addDays(iso, n) {
   return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
 }
 const ddmm = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
+/** Момент часу (ISO) → «01:24» сьогодні або «06.11 о 21:19». */
+function whenKyiv(iso) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(iso)).map((x) => [x.type, x.value]));
+  const date = `${p.year}-${p.month}-${p.day}`;
+  return date === kyivNow().date ? `${p.hour}:${p.minute}` : `${p.day}.${p.month} о ${p.hour}:${p.minute}`;
+}
+/** saved_at з сайту ДПЕМ («2026-11-06 19:02:03», київський час) → «06.11 о 19:02». */
+const savedKyiv = (s) => (s && s.length >= 16 ? `${ddmm(s.slice(0, 10))} о ${s.slice(11, 16)}` : '');
+function dayWord(d) {
+  const now = kyivNow().date;
+  if (d === now) return 'сьогодні';
+  if (d === addDays(now, 1)) return 'завтра';
+  if (d === addDays(now, -1)) return 'вчора';
+  return new Intl.DateTimeFormat('uk-UA', { weekday: 'short', timeZone: 'UTC' }).format(new Date(d + 'T12:00:00Z'));
+}
 
 /** Вікна відключень: суцільні відрізки 1/2/3 (з перемиканням) та 4 (можливе). */
 function windowsOf(vals) {
@@ -273,6 +367,13 @@ function windowsOf(vals) {
   return out;
 }
 const offMinutes = (vals) => windowsOf(vals).filter((w) => w.type === 'off').reduce((s, w) => s + (w.to - w.from) * 30, 0);
+function winsText(vals) {
+  if (!vals || vals.every((v) => v === null)) return 'немає даних';
+  const ws = windowsOf(vals);
+  const off = ws.filter((w) => w.type === 'off').map((w) => `${fmt(w.from)}–${fmt(w.to)}`);
+  const maybe = ws.filter((w) => w.type === 'maybe').map((w) => `${fmt(w.from)}–${fmt(w.to)}`);
+  return [off.length ? off.join(', ') : 'без відключень', maybe.length ? `можливо ${maybe.join(', ')}` : ''].filter(Boolean).join(' · ');
+}
 
 function schedule(date) { return state.data?.schedules.find((s) => s.date === date) || null; }
 function rowVals(date, qid) { return schedule(date)?.rows?.[qid] || null; }
@@ -334,7 +435,7 @@ function ringHtml(vals, date, qid) {
   return `<div class="ring"><svg viewBox="0 0 180 180" role="img" aria-label="Графік на добу ${esc(qid)}">${segs}${hours}${hand}</svg>${center}</div>`;
 }
 
-/* ===================== рендер ===================== */
+/* ===================== картки адрес ===================== */
 
 function winsHtml(vals) {
   if (!vals) return '<ul class="wins"><li>Графік на цю дату не опубліковано</li></ul>';
@@ -350,10 +451,12 @@ function winsHtml(vals) {
   }).join('')}</ul>`;
 }
 
+const feedersOf = (rows) => [...new Set(rows.map((r) => r.feeder))];
+const joinUk = (list) => (list.length > 1 ? `${list.slice(0, -1).join(', ')} і ${list[list.length - 1]}` : list.join(''));
 function rowsLabel(rows) {
   const subs = [...new Set(rows.map((r) => r.substation))].join(', ');
-  const feeders = [...new Set(rows.map((r) => r.feeder))].join(', ');
-  return `${subs} · фідер ${feeders}${rows.some((r) => r.partial) ? ' · частково' : ''}`;
+  const fs = feedersOf(rows);
+  return `${subs} · ${fs.length > 1 ? 'фідери' : 'фідер'} ${fs.join(', ')}${rows.some((r) => r.partial) ? ' · частково' : ''}`;
 }
 
 function housesHtml(hits, query) {
@@ -381,10 +484,10 @@ function sqHtml(qid, sub, extra) {
 
 function renderCard(g, house, opts = {}) {
   const e = displayEntry(g.hits);
-  let title = esc(`${e.type ? e.type + ' ' : ''}${e.name}`);
+  let title = esc(fullName(e));
   const flags = [];
-  if (house && g.level === 'exact') title += `, ${esc(g.matched)}`;
-  if (g.level === 'close') flags.push(`<span class="flag warn">Будинку «${esc(house)}» у переліку немає, знайдено схожий номер: ${esc(g.matched)}</span>`);
+  if (house && g.level === 'exact') title += `, ${esc(shownHouse(g, house))}`;
+  if (g.level === 'close') flags.push(`<span class="flag warn">Будинку «${esc(house.toUpperCase())}» у переліку немає, знайдено схожий номер: ${esc(g.matched)}</span>`);
   if (g.level === 'street') flags.push('<span class="flag">Номери будинків не вказані — у переліку вулиця загалом (може бути частково)</span>');
   if (g.level === 'object') flags.push('<span class="flag">Згадка в переліку без номера будинку</span>');
   const notes = [...new Set(g.hits.map((h) => h.entry.note).filter(Boolean))];
@@ -395,8 +498,19 @@ function renderCard(g, house, opts = {}) {
     if (!bySq.has(h.qid)) bySq.set(h.qid, []);
     bySq.get(h.qid).push(h);
   }
-  const sqs = [...bySq.keys()].sort((a, b) => state.order[a] - state.order[b]);
-  if (sqs.length > 1) flags.push(`<span class="flag">Адреса є в ${sqs.length} підчергах — будинок може живитися від кількох ліній, діють обидва графіки</span>`);
+  const sqs = qidsOf(g);
+  if (sqs.length > 1) {
+    const n = sqs.length;
+    const lines = joinUk(sqs.map((q) => `${q} (фідер ${feedersOf(bySq.get(q).map((h) => h.row)).join(', ')})`));
+    const all = n === 2 ? 'обидва графіки' : 'усі ці графіки';
+    if (g.level === 'exact') {
+      flags.push(`<span class="flag warn">Будинок живиться від ${n === 2 ? 'двох ліній' : `${n} ліній`}: ${esc(lines)}. Які під'їзди від якої лінії — ДПЕМ не публікує, тож зважайте на ${all}.</span>`);
+    } else if (!house && g.hits.some((h) => h.entry.houses.length)) {
+      flags.push(`<span class="flag">Будинки цієї вулиці — у ${n} підчергах: ${esc(lines)}. Додайте номер будинку, щоб побачити саме свій графік.</span>`);
+    } else {
+      flags.push(`<span class="flag">Адреса є в ${n} підчергах: ${esc(lines)} — зважайте на ${all}.</span>`);
+    }
+  }
 
   const saved = opts.savedUid ? { uid: opts.savedUid } : savedFound(g.id);
   const pin = opts.savedUid
@@ -412,7 +526,7 @@ function renderCard(g, house, opts = {}) {
     return sqHtml(qid, rowsLabel(rows), extra);
   }).join('');
 
-  return `<article class="card">
+  return `<article class="card"${opts.savedUid ? '' : ` data-gid="${esc(g.id)}"`}>
     <div class="card-head"><h3>${title}</h3>${pin}<div class="loc">${esc(e.loc)}</div>${flags.length ? `<div class="flags">${flags.join('')}</div>` : ''}</div>
     ${sections}
   </article>`;
@@ -459,8 +573,8 @@ function adderHtml(prefill, open) {
 function missesHtml(misses, house) {
   return misses.map((m) => {
     const e = displayEntry(m.hits);
-    return `<div class="miss"><b>${esc(`${e.type ? e.type + ' ' : ''}${e.name}`)}</b> (${esc(e.loc)}):
-      будинку <b>${esc(house)}</b> у переліках ГПВ немає. Є: ${esc(sortHouses(m.houses).join(', '))}.</div>`;
+    return `<div class="miss"><b>${esc(fullName(e))}</b> (${esc(e.loc)}):
+      будинку <b>${esc(house.toUpperCase())}</b> у переліках ГПВ немає. Є: ${esc(sortHouses(m.houses).join(', '))}.</div>`;
   }).join('');
 }
 
@@ -469,6 +583,7 @@ function renderResults() {
   if (!state.data) return;
   const q = state.query.trim();
   state.cards = [];
+  state.lastRes = null;
 
   if (!q) {
     const mine = state.mine.length
@@ -478,11 +593,17 @@ function renderResults() {
       <div class="hint"><p>${state.mine.length ? 'Шукайте іншу адресу:' : 'Почніть вводити вулицю й номер будинку — можна скорочено, наприклад «Шев 10». Знайдену адресу можна зберегти ☆, і вона показуватиметься тут одразу.'}</p>
       <div class="examples">${EXAMPLES.map((x) => `<button type="button" data-q="${esc(x)}">${esc(x)}</button>`).join('')}</div></div>
       ${adderHtml('', state.addOpen)}`;
+    renderHistory();
     return;
   }
 
   const res = search(q);
+  if (state.focusId) {
+    const i = res.cards.findIndex((c) => c.id === state.focusId);
+    if (i > 0) res.cards.unshift(...res.cards.splice(i, 1));
+  }
   state.cards = res.cards;
+  state.lastRes = res;
   const manual = res.words.length
     ? state.mine.filter((m) => m.kind === 'manual' && wordsMatch(res.words, words(`${m.title} ${m.loc || ''}`)))
     : [];
@@ -503,7 +624,90 @@ function renderResults() {
   const nothing = !res.cards.length && !manual.length;
   parts.push(adderHtml(nothing ? q : '', state.addOpen || nothing));
   box.innerHTML = parts.join('');
+  renderHistory();
 }
+
+/* ===================== історія пошуку (ліворуч) ===================== */
+
+/** Запит, який знову знайде саме цю картку, — повною назвою, а не «шев 10». */
+function canonicalQuery(g, title, typed) {
+  const e = displayEntry(g.hits);
+  for (const q of [title, `${shortLoc(e.loc)} ${title}`]) {
+    if (search(q).cards.some((c) => c.id === g.id)) return q;
+  }
+  return typed;
+}
+
+/**
+ * Записати адресу в історію. mode: 'enter' / 'click' — завжди; 'idle' / 'blur' — лише коли
+ * результат однозначний (знайдено конкретний будинок або єдиний збіг), щоб не засмічувати історію.
+ */
+function commitHistory(mode, gid) {
+  const res = state.lastRes;
+  const typed = state.query.trim();
+  if (!res || !typed || !res.cards.length) return;
+  const g = (gid && res.cards.find((c) => c.id === gid)) || res.cards[0];
+  const sure = res.cards.length === 1 || (res.house && g.level === 'exact');
+  if ((mode === 'idle' || mode === 'blur') && !sure) return;
+
+  const e = displayEntry(g.hits);
+  const h = shownHouse(g, res.house);
+  const title = `${fullName(e)}${h ? `, ${h}` : ''}`;
+  const item = {
+    uid: uid(), id: g.id, title, loc: e.loc, qids: qidsOf(g), q: canonicalQuery(g, title, typed),
+    note: g.level === 'close' ? `схожий номер ${g.matched}` : g.level === 'street' ? 'вулиця загалом' : '', t: Date.now(),
+  };
+  // поки людина друкує «Шев 1» → «Шев 10», замінюємо щойно доданий автоматично запис
+  const lc = state.lastCommit;
+  if (lc && lc.auto && Date.now() - lc.t < 20000 && lc.id !== item.id
+      && (fold(typed).startsWith(fold(lc.typed)) || fold(lc.typed).startsWith(fold(typed)))) {
+    state.hist = state.hist.filter((x) => x.id !== lc.id);
+  }
+  state.hist = [item, ...state.hist.filter((x) => x.id !== item.id && x.title !== item.title)].slice(0, HIST_MAX);
+  state.lastCommit = { id: item.id, typed, t: Date.now(), auto: mode === 'idle' || mode === 'blur' };
+  saveHist();
+  renderHistory();
+}
+
+function histStatus(qids) {
+  const now = kyivNow();
+  if (!schedule(now.date)) return null;
+  const sts = qids.map((q) => statusFor(rowVals(now.date, q), now.minutes));
+  const off = sts.find((s) => s.cls === 'off');
+  if (off) return { cls: 'off', text: 'зараз світла немає' };
+  if (sts.some((s) => s.cls === 'maybe')) return { cls: 'maybe', text: 'зараз можливе відключення' };
+  if (sts.every((s) => s.cls === 'unknown')) return null;
+  return { cls: 'on', text: 'зараз світло є' };
+}
+
+function renderHistory() {
+  const box = $('#hist');
+  $('#hist-clear').hidden = !state.hist.length;
+  if (!state.hist.length) {
+    box.innerHTML = '<li class="hist-empty">Тут з’являться адреси, які ви шукали, — повними назвами, наприклад «бульвар Шевченка, 10».</li>';
+    return;
+  }
+  const cur = state.query.trim() && state.cards[0] ? state.cards[0].id : null;
+  box.innerHTML = state.hist.map((h) => {
+    const st = state.data ? histStatus(h.qids || []) : null;
+    const sub = [shortLoc(h.loc), (h.qids || []).join(' · '), h.note].filter(Boolean).join(' · ');
+    return `<li${h.id === cur ? ' class="cur"' : ''}>
+      <button type="button" class="hist-go" data-hist="${esc(h.uid)}">
+        <i class="dot ${st ? st.cls : 'none'}" title="${esc(st ? st.text : '')}"></i>
+        <b>${esc(h.title)}</b><span>${esc(sub)}</span>
+      </button>
+      <button type="button" class="hist-x" data-hist-del="${esc(h.uid)}" aria-label="Прибрати «${esc(h.title)}» з історії">×</button>
+    </li>`;
+  }).join('');
+}
+
+function setDrawer(open) {
+  document.body.classList.toggle('side-open', open);
+  $('#side-backdrop').hidden = !open;
+  $('#hist-toggle').setAttribute('aria-expanded', String(open));
+}
+
+/* ===================== дні, огляд усіх черг ===================== */
 
 function renderDays() {
   const now = kyivNow();
@@ -512,15 +716,58 @@ function renderDays() {
   if (!shown.length) shown.push(...dates.slice(0, 2));
   if (!shown.includes(state.date)) shown.push(state.date);
   shown.sort();
-  const label = (d) => {
-    if (d === now.date) return 'Сьогодні';
-    if (d === addDays(now.date, 1)) return 'Завтра';
-    if (d === addDays(now.date, -1)) return 'Вчора';
-    return new Intl.DateTimeFormat('uk-UA', { weekday: 'short', timeZone: 'UTC' }).format(new Date(d + 'T12:00:00Z'));
-  };
-  $('#days').innerHTML = shown.map((d) =>
-    `<button type="button" role="tab" data-date="${d}" aria-selected="${d === state.date}">${label(d)}<small>${ddmm(d)}</small></button>`,
-  ).join('');
+  $('#days').innerHTML = shown.map((d) => {
+    const w = dayWord(d);
+    return `<button type="button" role="tab" data-date="${d}" aria-selected="${d === state.date}">${w[0].toUpperCase() + w.slice(1)}<small>${ddmm(d)}</small></button>`;
+  }).join('');
+}
+
+/** Плашка підчерги: які адреси вимикаються і від яких фідерів вони живляться. */
+function queuePanelHtml(qid) {
+  const q = state.data.queues.find((x) => x.id === qid);
+  if (!q || !q.rows.length) return '<p class="qp-empty">Переліку адрес для цієї підчерги на сайті ДПЕМ немає.</p>';
+  const fs = feedersOf(q.rows);
+  const intro = `<p class="qp-intro">Підчерга <b>${esc(qid)}</b> — ${fs.length} ${fs.length === 1 ? 'лінія (фідер)' : fs.length < 5 ? 'лінії (фідери)' : 'ліній (фідерів)'}.
+    За графіком вимикається все, що нижче. Натисніть на вулицю — покажу її картку.</p>`;
+  const blocks = q.rows.map((r) => {
+    const sw = SWITCH_LABEL[r.switch];
+    const byLoc = new Map();
+    for (const e of r.entries) {
+      if (!byLoc.has(e.loc)) byLoc.set(e.loc, { streets: [], other: [] });
+      byLoc.get(e.loc)[e.kind === 'street' ? 'streets' : 'other'].push(e);
+    }
+    const locs = [...byLoc].map(([loc, { streets, other }]) => {
+      const streetBtn = (e) => {
+        const key = `${e.loc}|${streetKey(e.name)}`;
+        const best = state.best.get(key) || e;
+        // у місті — просто назва (потрібна картка стане першою), в інших населених пунктах — з його назвою
+        const sq = `${loc.includes('Південноукраїнськ') ? '' : shortLoc(loc) + ' '}${fullName(best)}`;
+        return `<button type="button" class="qp-street" data-q="${esc(sq)}" data-focus="${esc(`${key}||`)}">${esc(fullName(best))}</button>`;
+      };
+      const note = (e) => (e.note ? ` <span class="muted">(${esc(e.note)})</span>` : '');
+      const lis = streets.filter((e) => e.houses.length)
+        .map((e) => `<li>${streetBtn(e)} <span class="qp-h">${sortHouses(e.houses).map(esc).join(', ')}</span>${note(e)}</li>`);
+      const whole = streets.filter((e) => !e.houses.length);
+      if (whole.length) {
+        lis.push(`<li><span class="muted">Без номерів будинків (вулиця загалом):</span> ${whole.map((e) => streetBtn(e) + note(e)).join(', ')}</li>`);
+      }
+      if (other.length) {
+        const objs = other.map((e) => esc(`${e.name}${e.houses.length ? ` ${e.houses.join(', ')}` : ''}${e.note ? ` ${e.note}` : ''}`));
+        lis.push(`<li class="qp-obj"><span class="muted">Об’єкти:</span> ${objs.join(', ')}</li>`);
+      }
+      return `<div class="qp-loc">${esc(loc)}</div><ul class="qp-list">${lis.join('')}</ul>`;
+    }).join('');
+    return `<section class="fd">
+      <div class="fd-head">
+        <span class="fd-no">Фідер ${esc(r.feeder)}</span>
+        <span class="fd-meta">${esc(r.substation)}${sw ? ` · <span title="${esc(sw[1])}">${esc(sw[0])}</span>` : r.switch ? ` · ${esc(r.switch)}` : ''}</span>
+        ${r.partial ? '<span class="fd-part" title="На сайті ДПЕМ перелік позначено «частково»: частина будинку чи вулиці може живитися від іншої лінії">частково</span>' : ''}
+      </div>
+      ${locs || '<p class="qp-empty">Адрес у переліку не вказано.</p>'}
+      <details class="raw-box"><summary>Як записано на сайті ДПЕМ</summary><div class="raw">${esc(r.text)}</div></details>
+    </section>`;
+  }).join('');
+  return intro + blocks;
 }
 
 function renderOverview() {
@@ -529,48 +776,228 @@ function renderOverview() {
   if (!sch) { $('#overview').innerHTML = '<div class="hm"><div class="empty">Графік на цю дату не опубліковано.</div></div>'; return; }
   const hit = new Set(state.cards.flatMap((g) => g.hits.map((h) => h.qid)));
   const now = kyivNow();
+  const today = state.date === now.date;
   const rows = state.data.subqueues.map((qid) => {
     const vals = sch.rows[qid];
-    const ws = windowsOf(vals);
-    const off = ws.filter((w) => w.type === 'off').map((w) => `${fmt(w.from)}–${fmt(w.to)}`);
-    const maybe = ws.filter((w) => w.type === 'maybe').map((w) => `${fmt(w.from)}–${fmt(w.to)}`);
     const mins = offMinutes(vals);
+    const open = state.openQ.has(qid);
+    const nf = feedersOf(state.data.queues.find((x) => x.id === qid)?.rows || []).length;
     const cells = vals.map((v, i) => `<i class="c v${v ?? 'x'}" title="${esc(qid)} · ${fmt(i)}–${fmt(i + 1)} · ${esc(STATE_LABEL[v] ?? 'немає даних')}"></i>`).join('');
-    const times = [off.length ? off.join(', ') : 'без відключень', maybe.length ? `можливо ${maybe.join(', ')}` : ''].filter(Boolean).join(' · ');
-    return `<div class="hm-row${mins ? '' : ' dim'}${hit.has(qid) ? ' hit' : ''}">
-      <span class="hm-lab">${esc(qid)}</span><div class="hm-cells">${cells}</div><span class="hm-sum">${mins ? esc(durShort(mins)) : '—'}</span>
-      <div class="hm-times">${esc(times)}</div></div>`;
+    return `<div class="hm-item${open ? ' open' : ''}">
+      <div class="hm-row${mins ? '' : ' dim'}${hit.has(qid) ? ' hit' : ''}" role="button" tabindex="0" aria-expanded="${open}" data-sq="${esc(qid)}">
+        <span class="hm-lab">${esc(qid)}</span><div class="hm-cells">${cells}</div><span class="hm-sum">${mins ? esc(durShort(mins)) : '—'}</span>
+        <div class="hm-times"><span>${esc(winsText(vals))}</span><span class="hm-more">${open ? 'сховати' : `адреси · ${nf} ${nf === 1 ? 'фідер' : nf < 5 ? 'фідери' : 'фідерів'}`}</span></div>
+      </div>
+      ${open ? `<div class="hm-panel">${queuePanelHtml(qid)}</div>` : ''}
+    </div>`;
   }).join('');
-  const nowLine = state.date === now.date ? `<div class="hm-now" style="--now:${(now.minutes / 1440).toFixed(4)}"></div>` : '';
-  $('#overview').innerHTML = `<div class="hm">
+  $('#overview').innerHTML = `<div class="hm${today ? ' today' : ''}" style="--now:${(now.minutes / 1440).toFixed(4)}">
     <div class="hm-hours"><span></span><div><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div><span class="sumh" title="без світла за добу">вимк.</span></div>
-    ${rows}${nowLine}</div>`;
+    ${rows}</div>`;
 }
 
-function renderMeta() {
-  const d = state.data;
-  const sch = schedule(state.date);
-  const t = (iso) => new Intl.DateTimeFormat('uk-UA', { timeZone: TZ, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(iso));
-  const parts = [];
-  if (sch?.saved_at) parts.push(`Графік на ${ddmm(sch.date)} оновлено на сайті ДПЕМ ${ddmm(sch.saved_at.slice(0, 10))} о ${sch.saved_at.slice(11, 16)}`);
-  if (d.fetched_at) parts.push(`дані отримано ${t(d.fetched_at)}`);
-  $('#meta').innerHTML = `${esc(parts.join(' · '))} · <button type="button" id="refresh">оновити</button>`;
-  const n = $('#notice');
-  const ageMin = d.fetched_at ? (Date.now() - Date.parse(d.fetched_at)) / 60000 : 0;
-  if (d.stale && d.error) {
-    n.hidden = false;
-    n.innerHTML = 'Не вдалося оновити дані з сайту ДПЕМ — показано збережену копію. <button type="button" id="retry">Спробувати ще</button>';
-  } else if (ageMin > STALE_AFTER_MIN) {
-    n.hidden = false;
-    n.innerHTML = `Дані могли застаріти: останнє оновлення ${esc(t(d.fetched_at))}. Звірте з <a href="https://info.dpem.mk.ua/off_graf.html" target="_blank" rel="noopener">сайтом ДПЕМ</a>.`;
-  } else n.hidden = true;
+/* ===================== звірка з сайтом ДПЕМ ===================== */
+
+/** Коли востаннє дані точно відповідали сайту ДПЕМ. */
+function freshAt() {
+  const a = state.data?.fetched_at ? Date.parse(state.data.fetched_at) : 0;
+  const b = STATIC_MODE && state.live ? Date.parse(state.live.checked_at) : 0;
+  return Math.max(a || 0, b || 0);
 }
+
+function renderSync() {
+  renderSyncText();
+  renderSyncResult();
+}
+
+/** Рядок стану біля кнопки: коли ДПЕМ опублікував графік і коли ми його звіряли. */
+function renderSyncText() {
+  const btn = $('#verify');
+  btn.disabled = state.verifying;
+  btn.classList.toggle('busy', state.verifying);
+  btn.querySelector('span').textContent = state.verifying ? 'Звіряю…' : 'Звірити графіки';
+  if (!state.data) { $('#sync-text').innerHTML = ''; return; }
+
+  const sch = schedule(state.date);
+  const at = freshAt();
+  const ageMin = at ? (Date.now() - at) / 60000 : Infinity;
+  const viaLive = STATIC_MODE && state.live && Date.parse(state.live.checked_at) >= Date.parse(state.data.fetched_at || 0);
+  const line1 = sch?.saved_at
+    ? `Графік на ${ddmm(sch.date)} опубліковано на сайті ДПЕМ ${savedKyiv(sch.saved_at)}`
+    : `Графіка на ${ddmm(state.date)} немає`;
+  let line2;
+  if (!at) line2 = 'ще не перевірено';
+  else if (!STATIC_MODE) line2 = `програма перевірила сайт ДПЕМ о ${whenKyiv(new Date(at).toISOString())}`;
+  else if (viaLive) line2 = `звірено з сайтом ДПЕМ о ${whenKyiv(new Date(at).toISOString())}`;
+  else line2 = `копія на цьому сайті від ${whenKyiv(new Date(at).toISOString())}`;
+  const warn = ageMin > STALE_AFTER_MIN && !state.verifying;
+  if (warn) line2 += ' — могло змінитися, звірте';
+  $('#sync').classList.toggle('warn', warn);
+  $('#sync-text').innerHTML = `<b>${esc(line1)}</b><span>${esc(line2)}</span>`;
+}
+
+/** Результат звірки: збігається / що змінилося / чому не вдалося. */
+function renderSyncResult() {
+  const v = state.vres;
+  const at = freshAt();
+  const box = $('#sync-res');
+  if (!v) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  box.className = `sync-res ${v.status}`;
+  const close = '<button type="button" class="sync-x" data-vclose aria-label="Закрити">×</button>';
+  if (v.status === 'busy') {
+    box.innerHTML = `<b>Завантажую графік із сайту ДПЕМ…</b><span>${STATIC_MODE ? 'Сторінка ДПЕМ велика (≈1,5 МБ), зазвичай 5–10 секунд.' : 'Програма звертається до сайту ДПЕМ.'}</span>`;
+    return;
+  }
+  const latest = state.data.schedules.filter((s) => s.date >= kyivNow().date).map((s) => s.saved_at).sort().pop();
+  const tail = v.at ? `Звірено о ${whenKyiv(v.at)}${latest ? ` · останні зміни графіка на ДПЕМ — ${savedKyiv(latest)}` : ''}.` : '';
+  if (v.status === 'same') {
+    box.innerHTML = `${close}<b>✓ Графіки збігаються з сайтом ДПЕМ</b><span>${esc(tail)}</span>`;
+  } else if (v.status === 'changed') {
+    box.innerHTML = `${close}<b>Графік на сайті ДПЕМ змінився — уже показано новий</b>${changesHtml(v.changes)}<span>${esc(tail)}</span>`
+      + (v.reason ? `<span>Напряму звірити не вдалося (${esc(v.reason)}), зміни взято з копії сайту.</span>` : '');
+  } else {
+    box.innerHTML = `${close}<b>Не вдалося звірити з сайтом ДПЕМ</b>
+      <span>${esc(v.reason)}. Показано ${STATIC_MODE ? 'копію' : 'збережену копію'} від ${esc(at ? whenKyiv(new Date(at).toISOString()) : '—')}.
+      <a href="${SOURCE_URL}" target="_blank" rel="noopener">Відкрити графік на сайті ДПЕМ</a></span>
+      <button type="button" class="sync-again" data-verify>Спробувати ще</button>`;
+  }
+}
+
+function changesHtml(changes) {
+  const mineQ = new Set([...state.cards.flatMap(qidsOf), ...state.mine.map((m) => m.qid).filter(Boolean), ...state.hist.slice(0, 5).flatMap((h) => h.qids || [])]);
+  return `<ul class="chg">${changes.map((c) => {
+    const day = `${dayWord(c.date)} ${ddmm(c.date)}`;
+    if (c.added) return `<li><b>${esc(day)}</b>: опубліковано графік на цей день</li>`;
+    const first = c.qids.filter((q) => mineQ.has(q));
+    const shown = (first.length ? first : c.qids).slice(0, 4);
+    const rest = c.qids.filter((q) => !shown.includes(q));
+    const det = shown.map((q) => `<div><span class="tag-s">${esc(q)}</span> було ${esc(winsText(c.before[q]))} → <b>${esc(winsText(c.after[q]))}</b></div>`).join('');
+    return `<li><b>${esc(day)}</b>: змінено ${c.qids.length === 12 ? 'усі підчерги' : `${c.qids.length === 1 ? 'підчергу' : 'підчерги'} ${esc(c.qids.join(', '))}`}${det}${rest.length ? `<div class="muted">інші: ${esc(rest.join(', '))}</div>` : ''}</li>`;
+  }).join('')}</ul>`;
+}
+
+/** Масив records зі сторінки ДПЕМ → графіки (та сама логіка, що й у dpem.py). */
+function parseRecords(page) {
+  const m = page.match(/\brecords\s*=\s*(\[\s*\{[\s\S]*?\}\s*\])\s*;/);
+  if (!m) throw new Error('на сторінці ДПЕМ не знайдено графіка');
+  let raw;
+  try { raw = JSON.parse(m[1]); } catch { throw new Error('не вдалося прочитати графік на сторінці ДПЕМ'); }
+  const sq = state.data?.subqueues || SUBQUEUES;
+  const need = SLOTS * sq.length;
+  const best = new Map();
+  for (const rec of Array.isArray(raw) ? raw : []) {
+    const date = String(rec?.date ?? '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    const vals = (Array.isArray(rec.data) ? rec.data : []).slice(0, need).map((v) => {
+      const s = String(v ?? '').trim();
+      const n = s === '' ? NaN : Number(s);
+      return Number.isInteger(n) ? n : null;
+    });
+    while (vals.length < need) vals.push(null);
+    const saved = String(rec.saved_at ?? '');
+    const prev = best.get(date);
+    if (prev && prev.saved_at >= saved) continue;
+    best.set(date, { date, saved_at: saved, rows: Object.fromEntries(sq.map((q, i) => [q, vals.slice(i * SLOTS, (i + 1) * SLOTS)])) });
+  }
+  if (!best.size) throw new Error('на сторінці ДПЕМ немає жодного графіка');
+  return [...best.values()].sort((a, b) => b.date.localeCompare(a.date));
+}
+
+async function fetchLive() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), LIVE_TIMEOUT_MS);
+  try {
+    const r = await fetch(LIVE_URL, {
+      headers: { 'X-Return-Format': 'html', 'X-No-Cache': 'true' }, cache: 'no-store', signal: ctrl.signal,
+    });
+    if (r.status === 429) throw new Error('забагато перевірок поспіль — спробуйте за хвилину');
+    if (!r.ok) throw new Error(`сервіс, через який читається сайт ДПЕМ, відповів помилкою ${r.status}`);
+    return parseRecords(await r.text());
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`сайт ДПЕМ не відповів за ${LIVE_TIMEOUT_MS / 1000} секунд`);
+    if (err instanceof TypeError) throw new Error('немає з’єднання з сайтом ДПЕМ');
+    throw err;
+  } finally { clearTimeout(timer); }
+}
+
+/** Для кожної дати — найсвіжіша версія графіка (за часом збереження на сайті ДПЕМ). */
+function mergeSchedules(base, extra) {
+  const by = new Map(base.map((s) => [s.date, s]));
+  for (const s of extra || []) {
+    const b = by.get(s.date);
+    if (!b || (s.saved_at || '') > (b.saved_at || '')) by.set(s.date, s);
+  }
+  return [...by.values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 14);
+}
+
+function diffSchedules(before, after) {
+  const today = kyivNow().date;
+  const out = [];
+  for (const s of after) {
+    if (s.date < today) continue;
+    const o = before.find((x) => x.date === s.date);
+    if (!o) { if (before.length) out.push({ date: s.date, added: true }); continue; }
+    const qids = Object.keys(s.rows).filter((q) => JSON.stringify(s.rows[q]) !== JSON.stringify(o.rows[q]));
+    if (qids.length) out.push({ date: s.date, qids, before: o.rows, after: s.rows });
+  }
+  return out.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * «Звірити графіки»: exe/сервер — програма сама перечитує сайт ДПЕМ; статичний сайт — свіжа
+ * копія data.json + сторінка ДПЕМ напряму (через r.jina.ai). auto — тиха перевірка застарілої копії.
+ */
+async function verify(auto = false) {
+  if (state.verifying || (auto && !state.data)) return;
+  state.verifying = true;
+  if (!auto) state.vres = { status: 'busy' };
+  renderSync();
+  const before = state.data ? state.data.schedules : [];
+  let ok = false, at = null, reason = '';
+  try {
+    if (STATIC_MODE) {
+      const [copy, live] = await Promise.allSettled([fetchJson(`${DATA_URL}?t=${Date.now()}`), fetchLive()]);
+      if (live.status === 'fulfilled') {
+        const from = addDays(kyivNow().date, -1);
+        state.live = { checked_at: new Date().toISOString(), schedules: live.value.filter((s) => s.date >= from) };
+        writeJson(LIVE_KEY, state.live);
+        ok = true; at = state.live.checked_at;
+      } else reason = live.reason?.message || 'невідома помилка';
+      const base = copy.status === 'fulfilled' ? copy.value : state.data && { ...state.data };
+      if (base) applyData(base);
+    } else {
+      const d = await fetchJson(`${DATA_URL}?refresh=1`);
+      applyData(d);
+      if (d.stale && d.error) reason = `програма не змогла завантажити сайт ДПЕМ (${d.error})`;
+      else { ok = true; at = d.fetched_at; }
+    }
+  } catch (err) {
+    reason = err.message;
+  }
+  const changes = state.data ? diffSchedules(before, state.data.schedules) : [];
+  state.verifying = false;
+  if (auto) {
+    state.lastAutoVerify = Date.now();
+    if (changes.length) state.vres = { status: 'changed', changes, at, reason: ok ? '' : reason };
+  } else if (changes.length) state.vres = { status: 'changed', changes, at, reason: ok ? '' : reason };
+  else state.vres = ok ? { status: 'same', at } : { status: 'fail', reason };
+  renderSync();
+}
+
+function maybeAutoVerify() {
+  if (!STATIC_MODE || !state.data || state.verifying || document.visibilityState === 'hidden') return;
+  const ageMin = (Date.now() - freshAt()) / 60000;
+  if (ageMin > AUTO_VERIFY_AFTER_MIN && Date.now() - state.lastAutoVerify > 15 * 60 * 1000) verify(true);
+}
+
+/* ===================== загальний рендер ===================== */
 
 function renderAll() {
   renderDays();
   renderResults();
   renderOverview();
-  renderMeta();
+  renderSync();
   tickClock();
 }
 
@@ -581,6 +1008,9 @@ function tick() {
   tickClock();
   if (!state.data) return;
   const now = kyivNow();
+  const slot = Math.floor(now.minutes / 30);
+  if (slot !== state.lastSlot) { state.lastSlot = slot; renderHistory(); } // крапки «є/немає світла»
+  renderSyncText();
   if (state.date !== now.date) return;
   const ang = handAngle(now.minutes).toFixed(1);
   document.querySelectorAll('.ring .hand').forEach((h) => h.setAttribute('transform', `rotate(${ang} ${RING.c} ${RING.c})`));
@@ -594,76 +1024,158 @@ function tick() {
     el.className = `status ${st.cls}`;
     el.textContent = st.text;
   });
-  $('.hm-now')?.style.setProperty('--now', (now.minutes / 1440).toFixed(4));
+  $('.hm')?.style.setProperty('--now', (now.minutes / 1440).toFixed(4));
 }
 
 /* ===================== дані ===================== */
 
-async function load(force = false) {
+async function fetchJson(url) {
+  const r = await fetch(url, { cache: 'no-store' });
+  let d;
+  try { d = await r.json(); } catch { throw new Error(`сервер відповів HTTP ${r.status}`); }
+  if (!r.ok || !d.schedules) throw new Error(d.error || `HTTP ${r.status}`);
+  return d;
+}
+
+const sig = (x) => JSON.stringify([x.schedules.map((s) => s.date + s.saved_at), x.queues.map((q) => q.rows.map((w) => w.text))]);
+
+/** Прийняти нові дані; перемальовуємо лише якщо щось змінилося (щоб не згортати відкриті списки). */
+function applyData(d) {
+  if (STATIC_MODE && state.live) d.schedules = mergeSchedules(d.schedules, state.live.schedules);
+  const firstLoad = !state.data;
+  if (!firstLoad && sig(d) === sig(state.data)) {
+    Object.assign(state.data, { fetched_at: d.fetched_at, stale: d.stale, error: d.error });
+    renderSync();
+    return;
+  }
+  const queuesChanged = firstLoad || JSON.stringify(d.queues.map((q) => q.rows.map((w) => w.text))) !== JSON.stringify(state.data.queues.map((q) => q.rows.map((w) => w.text)));
+  state.data = d;
+  state.order = Object.fromEntries(d.subqueues.map((q, i) => [q, i]));
+  if (queuesChanged) {
+    state.index = buildIndex(d);
+    state.best = buildBest(state.index);
+  }
+  const dates = d.schedules.map((s) => s.date);
+  const today = kyivNow().date;
+  if (firstLoad || !dates.includes(state.date)) state.date = dates.includes(today) ? today : dates[0];
+  renderAll();
+}
+
+async function load() {
   if (!state.data) $('#results').innerHTML = '<div class="skeleton"></div>';
   try {
-    const url = STATIC_MODE ? `${DATA_URL}?t=${Date.now()}` : `${DATA_URL}${force ? '?refresh=1' : ''}`;
-    const r = await fetch(url, { cache: 'no-store' });
-    const d = await r.json();
-    if (!r.ok || !d.schedules) throw new Error(d.error || `HTTP ${r.status}`);
-    const firstLoad = !state.data;
-    const sig = (x) => JSON.stringify([x.schedules.map((s) => s.date + s.saved_at), x.queues.map((q) => q.rows.map((w) => w.text)), x.stale]);
-    if (!firstLoad && !force && sig(d) === sig(state.data)) { state.data.fetched_at = d.fetched_at; renderMeta(); return; }
-    state.data = d;
-    state.order = Object.fromEntries(d.subqueues.map((q, i) => [q, i]));
-    state.index = buildIndex(d);
-    const dates = d.schedules.map((s) => s.date);
-    const today = kyivNow().date;
-    if (firstLoad || !dates.includes(state.date)) state.date = dates.includes(today) ? today : dates[0];
-    renderAll();
+    const d = await fetchJson(STATIC_MODE ? `${DATA_URL}?t=${Date.now()}` : DATA_URL);
+    applyData(d);
+    $('#notice').hidden = true;
   } catch (err) {
     if (!state.data) {
       $('#results').innerHTML = `<div class="notice">Не вдалося завантажити графіки: ${esc(err.message)}
         <button type="button" id="retry">Спробувати ще</button></div>`;
     }
   }
+  maybeAutoVerify();
 }
 
 /* ===================== події ===================== */
 
-let debounce;
+let debounce, histTimer;
 const input = $('#q');
 function setQuery(v) {
   state.query = v;
   try { localStorage.setItem('gpv.q', v); } catch { /* приватний режим */ }
   renderResults();
   renderOverview();
+  clearTimeout(histTimer);
+  histTimer = setTimeout(() => commitHistory('idle'), HIST_IDLE_MS);
 }
 input.addEventListener('input', () => {
+  state.focusId = null;
   clearTimeout(debounce);
   debounce = setTimeout(() => setQuery(input.value), 120);
 });
+input.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Enter') return;
+  clearTimeout(debounce);
+  if (input.value !== state.query) setQuery(input.value);
+  clearTimeout(histTimer);
+  commitHistory('enter');
+  input.blur(); // ховає клавіатуру на телефоні
+});
+input.addEventListener('blur', () => { clearTimeout(histTimer); commitHistory('blur'); });
+
+function runQuery(q, focusId = null) {
+  input.value = q;
+  state.focusId = focusId;
+  setQuery(q);
+  setDrawer(false);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function toggleQueue(qid) {
+  if (state.openQ.has(qid)) state.openQ.delete(qid); else state.openQ.add(qid);
+  renderOverview();
+  $(`.hm-row[data-sq="${CSS.escape(qid)}"]`)?.focus({ preventScroll: true });
+}
 
 document.addEventListener('click', (ev) => {
-  const ex = ev.target.closest('[data-q]');
-  if (ex) { input.value = ex.dataset.q; setQuery(ex.dataset.q); input.focus(); return; }
-  const day = ev.target.closest('#days [data-date]');
+  const t = ev.target;
+  const ex = t.closest('[data-q]');
+  if (ex) { runQuery(ex.dataset.q, ex.dataset.focus || null); if (!ex.closest('.overview')) input.focus(); return; }
+  const hg = t.closest('[data-hist]');
+  if (hg) {
+    const h = state.hist.find((x) => x.uid === hg.dataset.hist);
+    if (h) {
+      h.t = Date.now();
+      state.hist = [h, ...state.hist.filter((x) => x !== h)];
+      saveHist();
+      state.lastCommit = null;
+      runQuery(h.q, h.id);
+    }
+    return;
+  }
+  const hd = t.closest('[data-hist-del]');
+  if (hd) { state.hist = state.hist.filter((x) => x.uid !== hd.dataset.histDel); saveHist(); renderHistory(); return; }
+  if (t.closest('#hist-clear')) { state.hist = []; saveHist(); renderHistory(); return; }
+  if (t.closest('#hist-toggle')) { setDrawer(!document.body.classList.contains('side-open')); return; }
+  if (t.closest('#side-close, #side-backdrop')) { setDrawer(false); return; }
+  const row = t.closest('.hm-row[data-sq]');
+  if (row) { toggleQueue(row.dataset.sq); return; }
+  const day = t.closest('#days [data-date]');
   if (day) { state.date = day.dataset.date; renderAll(); return; }
-  const save = ev.target.closest('[data-save]');
+  if (t.closest('#verify, [data-verify]')) { verify(false); return; }
+  if (t.closest('[data-vclose]')) { state.vres = null; renderSync(); return; }
+  const save = t.closest('[data-save]');
   if (save) {
     const existing = savedFound(save.dataset.save);
     if (existing) state.mine = state.mine.filter((m) => m !== existing);
     else {
       const g = state.cards.find((c) => c.id === save.dataset.save);
-      if (g) state.mine.push({ uid: uid(), kind: 'found', id: g.id, q: state.query.trim(), title: `${cardTitle(g)}${g.matched ? ', ' + g.matched : ''}` });
+      if (g) {
+        const h = shownHouse(g, state.lastRes?.house);
+        state.mine.push({ uid: uid(), kind: 'found', id: g.id, q: state.query.trim(), title: `${cardTitle(g)}${h ? ', ' + h : ''}` });
+      }
     }
     saveMine();
+    commitHistory('click', save.dataset.save);
     renderResults();
     return;
   }
-  const rm = ev.target.closest('[data-remove]');
+  const rm = t.closest('[data-remove]');
   if (rm) {
     state.mine = state.mine.filter((m) => m.uid !== rm.dataset.remove);
     saveMine();
     renderResults();
     return;
   }
-  if (ev.target.closest('#refresh, #retry')) load(true);
+  if (t.closest('#retry')) { load(); return; }
+  const card = t.closest('article.card[data-gid]');
+  if (card) commitHistory('click', card.dataset.gid);
+});
+
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && document.body.classList.contains('side-open')) { setDrawer(false); return; }
+  const row = ev.target.closest?.('.hm-row[data-sq]');
+  if (row && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); toggleQueue(row.dataset.sq); }
 });
 
 document.addEventListener('toggle', (ev) => {
@@ -683,9 +1195,19 @@ document.addEventListener('submit', (ev) => {
   renderResults();
 });
 
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load(); });
+
+// висота шапки — щоб історія ліворуч «прилипала» одразу під нею
+const mast = $('#mast');
+const setMastH = () => document.documentElement.style.setProperty('--mast-h', `${mast.offsetHeight}px`);
+if ('ResizeObserver' in window) new ResizeObserver(setMastH).observe(mast);
+setMastH();
+
 try { input.value = localStorage.getItem('gpv.q') || ''; } catch { /* ignore */ }
 state.query = input.value;
 tickClock();
+renderHistory();
+renderSync();
 load();
-setInterval(() => load(), REFRESH_MS);
+setInterval(load, REFRESH_MS);
 setInterval(tick, 30 * 1000);

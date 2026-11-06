@@ -20,16 +20,20 @@
     </defs>
   </svg>
 
-  <header class="mast">
-    <div class="wrap">
-      <div class="mast-top">
+  <header class="mast" id="mast">
+    <div class="shell mast-grid">
+      <div class="brand">
+        <button type="button" class="hist-toggle" id="hist-toggle" aria-controls="side" aria-expanded="false" title="Історія пошуку">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3 4v4.5h4.5"/><path d="M12 7.5V12l3 2"/></svg>
+          <span class="sr">Історія</span>
+        </button>
         <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3 5 14h6l-1 7 8-11h-6z"/></svg>
         <div class="mast-title">
           <h1>Коли світло?</h1>
           <p>Графік погодинних відключень · Південноукраїнськ і громада</p>
         </div>
-        <div class="clock" id="clock" title="Київський час"></div>
       </div>
+      <div class="clock" id="clock" title="Київський час"></div>
       <label class="search" for="q">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <input id="q" type="search" placeholder="Вулиця і будинок — напр. «Шев 10»" autocomplete="off" spellcheck="false" enterkeyhint="search">
@@ -38,31 +42,52 @@
     </div>
   </header>
 
-  <main class="wrap">
-    <div id="notice" class="notice" hidden></div>
-    <section id="results" aria-live="polite"></section>
-
-    <section class="overview">
-      <div class="sec-head">
-        <h2 id="overview-title">Усі черги</h2>
-        <div class="legend">
-          <span><i class="c v0"></i>світло є</span>
-          <span><i class="c v2"></i>немає</span>
-          <span><i class="c v1"></i>перемикання</span>
-          <span><i class="c v4"></i>можливе</span>
-        </div>
+  <div class="shell layout">
+    <aside class="side" id="side" aria-label="Історія пошуку">
+      <div class="side-head">
+        <h2>Історія</h2>
+        <button type="button" class="link" id="hist-clear" hidden>очистити</button>
+        <button type="button" class="side-close" id="side-close" aria-label="Закрити історію">×</button>
       </div>
-      <div id="overview"></div>
-    </section>
+      <ol class="hist" id="hist"></ol>
+      <p class="side-note">Адреси, які ви шукали, — повними назвами. Зберігаються лише в цьому браузері.</p>
+    </aside>
 
-    <footer class="foot">
-      <p id="meta" class="meta"></p>
-      <p>Дані: <a href="https://info.dpem.mk.ua/off_graf.html" target="_blank" rel="noopener">info.dpem.mk.ua — графік погодинних відключень</a>.
-        Неофіційний застосунок: графік може змінюватися протягом доби, перемикання черг триває до 30&nbsp;хв.</p>
-      <p><a href="https://github.com/raitodano/koly-svitlo/releases/latest/download/KolySvitlo.exe">Програма для Windows (KolySvitlo.exe)</a>
-        · <a href="https://github.com/raitodano/koly-svitlo" target="_blank" rel="noopener">код на GitHub</a></p>
-    </footer>
-  </main>
+    <main class="main">
+      <section class="sync" id="sync" aria-live="polite">
+        <button type="button" class="verify" id="verify" title="Перевірити графік напряму з сайтом ДПЕМ">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20.5 3.5v5h-5"/></svg>
+          <span>Звірити графіки</span>
+        </button>
+        <div class="sync-text" id="sync-text"></div>
+        <div class="sync-res" id="sync-res" hidden></div>
+      </section>
+      <div id="notice" class="notice" hidden></div>
+      <section id="results" aria-live="polite"></section>
+
+      <section class="overview">
+        <div class="sec-head">
+          <h2 id="overview-title">Усі черги</h2>
+          <div class="legend">
+            <span><i class="c v0"></i>світло є</span>
+            <span><i class="c v2"></i>немає</span>
+            <span><i class="c v1"></i>перемикання</span>
+            <span><i class="c v4"></i>можливе</span>
+          </div>
+        </div>
+        <p class="sec-hint">Натисніть на підчергу — відкриється перелік адрес, які вимикаються з нею, і фідери, від яких вони живляться.</p>
+        <div id="overview"></div>
+      </section>
+
+      <footer class="foot">
+        <p>Дані: <a href="https://info.dpem.mk.ua/off_graf.html" target="_blank" rel="noopener">info.dpem.mk.ua — графік погодинних відключень</a>.
+          Неофіційний застосунок: графік може змінюватися протягом доби, перемикання черг триває до 30&nbsp;хв.</p>
+        <p><a href="https://github.com/raitodano/koly-svitlo/releases/latest/download/KolySvitlo.exe">Програма для Windows (KolySvitlo.exe)</a>
+          · <a href="https://github.com/raitodano/koly-svitlo" target="_blank" rel="noopener">код на GitHub</a></p>
+      </footer>
+    </main>
+  </div>
+  <div class="side-backdrop" id="side-backdrop" hidden></div>
 
   <script src="app.js"></script>
 </body>
