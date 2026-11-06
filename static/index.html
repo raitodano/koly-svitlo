@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Коли світло? Пошук черги за адресою</title>
+  <meta name="description" content="Пошук черги погодинних відключень (ГПВ) ДПЕМ ПрАТ «Атомсервіс» за адресою">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23f5a524' d='M13 2 4 14h6l-1 8 9-12h-6z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <div class="brand">
+        <svg class="bolt" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>
+        <div>
+          <h1>Коли світло?</h1>
+          <p class="sub">Пошук черги ГПВ за адресою · Південноукраїнськ і громада</p>
+        </div>
+      </div>
+      <label class="search" for="q">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="q" type="search" placeholder="Вулиця і будинок, напр. «Шев 10»" autocomplete="off" spellcheck="false" enterkeyhint="search">
+      </label>
+      <div class="days" id="days" role="tablist" aria-label="Дата графіка"></div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div id="notice" class="notice" hidden></div>
+    <section id="results" aria-live="polite"></section>
+
+    <section class="overview">
+      <div class="section-head">
+        <h2 id="overview-title">Усі черги</h2>
+        <div class="legend">
+          <span><i class="c v0"></i>світло є</span>
+          <span><i class="c v2"></i>немає</span>
+          <span><i class="c v1"></i>перемикання</span>
+          <span><i class="c v4"></i>можливе</span>
+        </div>
+      </div>
+      <div id="overview"></div>
+    </section>
+
+    <footer class="foot">
+      <p id="meta" class="meta"></p>
+      <p>Дані: <a href="https://info.dpem.mk.ua/off_graf.html" target="_blank" rel="noopener">info.dpem.mk.ua — графік погодинних відключень</a>.
+        Неофіційний застосунок: графік може змінюватися протягом доби, перемикання черг триває до 30&nbsp;хв.</p>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
