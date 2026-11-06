@@ -1,9 +1,9 @@
 'use strict';
 
-/* Пошук черги ГПВ за адресою. Дані — /api/data (див. server.py, dpem.py). */
+/* Коли світло? — пошук черги ГПВ за адресою.
+   Дані: /api/data (локальний server.py / KolySvitlo.exe) або data.json (GitHub Pages,
+   збирає build_static.py). Як усе влаштовано — див. КАК_ЭТО_РАБОТАЕТ.md. */
 
-// Статична версія (GitHub Pages) підставляє window.GPV_DATA_URL = 'data.json',
-// яку раз на кілька хвилин оновлює GitHub Actions; локальний сервер віддає /api/data.
 const DATA_URL = window.GPV_DATA_URL || '/api/data';
 const STATIC_MODE = Boolean(window.GPV_DATA_URL);
 const STALE_AFTER_MIN = 90;
@@ -11,6 +11,7 @@ const TZ = 'Europe/Kyiv';
 const SLOTS = 48;
 const REFRESH_MS = 5 * 60 * 1000;
 const MAX_CARDS = 30;
+const MINE_KEY = 'gpv.mine';
 const STATE_LABEL = {
   0: 'світло є', 1: 'перемикання (вимкнення)', 2: 'світла немає',
   3: 'перемикання (увімкнення)', 4: 'можливе відключення',
@@ -20,7 +21,7 @@ const EXAMPLES = ['Шев 10', 'Незалежності 20', 'Європейс�
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const state = { data: null, index: [], date: null, query: '', order: {} };
+const state = { data: null, index: [], date: null, query: '', order: {}, cards: [], mine: loadMine(), addOpen: false };
 
 /* ===================== нормалізація тексту ===================== */
 
@@ -99,7 +100,7 @@ function wordScore(q, w, abbr) {
 function buildIndex(data) {
   const idx = [];
   for (const q of data.queues) {
-    q.rows.forEach((row, ri) => {
+    q.rows.forEach((row) => {
       for (const e of row.entries) {
         const nameWords = [];
         for (const piece of e.name.split(/\s+/)) {
@@ -107,7 +108,7 @@ function buildIndex(data) {
           ws.forEach((w, i) => nameWords.push({ w, abbr: i === ws.length - 1 && piece.endsWith('.') }));
         }
         idx.push({
-          qid: q.id, row, ri, entry: e, nameWords,
+          qid: q.id, row, entry: e, nameWords,
           locWords: words(e.loc).filter((w) => w.length > 1 && !STOP.has(w)),
           key: `${e.loc}|${streetKey(e.name)}`,
         });
@@ -144,9 +145,13 @@ function matchHouse(houses, q) {
 
 const LEVEL_BONUS = { exact: 10, street: 5, close: 2, object: 1, any: 0 };
 
+function wordsMatch(qw, ws) {
+  return qw.every((q) => alternatives(q).some((a) => ws.some((w) => wordScore(a, w, false) > 0)));
+}
+
 function search(text) {
   const { house, words: qw } = parseQuery(text);
-  if (!qw.length) return { house, cards: [], misses: [], noWords: true };
+  if (!qw.length) return { house, words: qw, cards: [], misses: [], noWords: true };
 
   const hits = [], locOnly = [], misses = new Map();
   for (const it of state.index) {
@@ -187,27 +192,14 @@ function search(text) {
   for (const h of hits.length ? hits : locOnly) {
     const gk = `${h.key}|${house ? h.level : ''}|${h.level === 'close' ? normHouse(h.matched) : ''}`;
     let g = groups.get(gk);
-    if (!g) groups.set(gk, (g = { hits: [], score: 0, level: h.level, matched: h.matched }));
+    if (!g) groups.set(gk, (g = { id: gk, hits: [], score: 0, level: h.level, matched: h.matched }));
     g.hits.push(h);
     g.score = Math.max(g.score, h.score);
   }
   const cards = [...groups.values()].sort((a, b) => b.score - a.score || cardTitle(a).localeCompare(cardTitle(b), 'uk'));
   const found = new Set(cards.filter((c) => c.level === 'exact' || c.level === 'close').map((c) => c.hits[0].key));
   const missList = [...misses.values()].filter((m) => !found.has(m.key));
-  return { house, cards: cards.slice(0, MAX_CARDS), total: cards.length, misses: missList, locOnly: !hits.length && locOnly.length > 0 };
-}
-
-function sortHouses(list) {
-  return [...list].sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0) || a.localeCompare(b, 'uk'));
-}
-
-function missesHtml(misses, house) {
-  if (!misses.length) return '';
-  return misses.map((m) => {
-    const e = displayEntry(m.hits);
-    return `<div class="miss"><b>${esc(`${e.type ? e.type + ' ' : ''}${e.name}`)}</b> <span class="loc">(${esc(e.loc)})</span>:
-      будинку <b>${esc(house)}</b> у переліках ГПВ немає. Є: ${esc(sortHouses(m.houses).join(', '))}.</div>`;
-  }).join('');
+  return { house, words: qw, cards: cards.slice(0, MAX_CARDS), total: cards.length, misses: missList, locOnly: !hits.length && locOnly.length > 0 };
 }
 
 /** Найкращий варіант написання назви серед збігів (з типом вулиці, без скорочень). */
@@ -219,6 +211,23 @@ function cardTitle(g) {
   const e = displayEntry(g.hits);
   return `${e.type ? e.type + ' ' : ''}${e.name}`;
 }
+function sortHouses(list) {
+  return [...list].sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0) || a.localeCompare(b, 'uk'));
+}
+
+/* ===================== «Мої адреси» (зберігаються в цьому браузері) ===================== */
+
+function loadMine() {
+  try {
+    const v = JSON.parse(localStorage.getItem(MINE_KEY) || '[]');
+    return Array.isArray(v) ? v.filter((m) => m && (m.kind === 'found' || m.kind === 'manual')) : [];
+  } catch { return []; }
+}
+function saveMine() {
+  try { localStorage.setItem(MINE_KEY, JSON.stringify(state.mine)); } catch { /* приватний режим */ }
+}
+const uid = () => Math.random().toString(36).slice(2, 10);
+const savedFound = (id) => state.mine.find((m) => m.kind === 'found' && m.id === id);
 
 /* ===================== час і графік ===================== */
 
@@ -226,17 +235,17 @@ function kyivNow() {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
     timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }).formatToParts(new Date()).map((x) => [x.type, x.value]));
-  return { date: `${p.year}-${p.month}-${p.day}`, minutes: +p.hour * 60 + +p.minute };
+  return { date: `${p.year}-${p.month}-${p.day}`, minutes: +p.hour * 60 + +p.minute, hhmm: `${p.hour}:${p.minute}` };
 }
 const fmt = (slot) => `${String(Math.floor(slot / 2)).padStart(2, '0')}:${slot % 2 ? '30' : '00'}`;
 function dur(min) {
   const h = Math.floor(min / 60), m = min % 60;
   return h ? `${h} год${m ? ` ${m} хв` : ''}` : `${m} хв`;
 }
+const durShort = (min) => `${Math.floor(min / 60)}${min % 60 ? ',5' : ''} год`; // слоти по 30 хв
 function addDays(iso, n) {
   const [y, m, d] = iso.split('-').map(Number);
-  const t = new Date(Date.UTC(y, m - 1, d + n));
-  return t.toISOString().slice(0, 10);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
 }
 const ddmm = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
 
@@ -263,38 +272,69 @@ function windowsOf(vals) {
   }
   return out;
 }
+const offMinutes = (vals) => windowsOf(vals).filter((w) => w.type === 'off').reduce((s, w) => s + (w.to - w.from) * 30, 0);
 
 function schedule(date) { return state.data?.schedules.find((s) => s.date === date) || null; }
 function rowVals(date, qid) { return schedule(date)?.rows?.[qid] || null; }
 
+/** Стан на зараз: cls — для кольору, text — розгорнуто, big/small — для центру циферблата. */
 function statusFor(vals, nowMin) {
-  if (!vals || vals.every((v) => v === null)) return { cls: 'unknown', text: 'Немає даних графіка' };
+  if (!vals || vals.every((v) => v === null)) return { cls: 'unknown', text: 'Немає даних графіка', big: 'Немає даних', small: '' };
   const slot = Math.floor(nowMin / 30);
   const ws = windowsOf(vals);
   const cur = ws.find((w) => slot >= w.from && slot < w.to);
   const nextOff = ws.find((w) => w.type === 'off' && w.from > slot);
-  if (cur?.type === 'off') return { cls: 'off', text: `Зараз світла немає · орієнтовно до ${fmt(cur.to)}` };
-  if (cur?.type === 'maybe') return { cls: 'maybe', text: `Зараз можливе відключення · до ${fmt(cur.to)}` };
-  if (nextOff) return { cls: 'on', text: `Зараз світло є · відключення о ${fmt(nextOff.from)} (через ${dur(nextOff.from * 30 - nowMin)})` };
+  if (cur?.type === 'off') return { cls: 'off', text: `Зараз світла немає · орієнтовно до ${fmt(cur.to)}`, big: 'Світла немає', small: `до ${fmt(cur.to)}` };
+  if (cur?.type === 'maybe') return { cls: 'maybe', text: `Зараз можливе відключення · до ${fmt(cur.to)}`, big: 'Можливе', small: `до ${fmt(cur.to)}` };
+  if (nextOff) {
+    return { cls: 'on', text: `Зараз світло є · відключення о ${fmt(nextOff.from)} (через ${dur(nextOff.from * 30 - nowMin)})`, big: 'Світло є', small: `вимкн. о ${fmt(nextOff.from)}` };
+  }
   const nextMaybe = ws.find((w) => w.type === 'maybe' && w.from > slot);
-  if (nextMaybe) return { cls: 'on', text: `Зараз світло є · можливе відключення о ${fmt(nextMaybe.from)}` };
-  return { cls: 'on', text: 'Зараз світло є · до кінця доби відключень не заплановано' };
+  if (nextMaybe) return { cls: 'on', text: `Зараз світло є · можливе відключення о ${fmt(nextMaybe.from)}`, big: 'Світло є', small: `можл. о ${fmt(nextMaybe.from)}` };
+  return { cls: 'on', text: 'Зараз світло є · до кінця доби відключень не заплановано', big: 'Світло є', small: 'до кінця доби' };
+}
+
+/* ===================== циферблат 24 год ===================== */
+
+const RING = { c: 90, r0: 60, r1: 84 };
+
+function polar(r, deg) {
+  const t = (deg - 90) * Math.PI / 180;
+  return `${(RING.c + r * Math.cos(t)).toFixed(2)} ${(RING.c + r * Math.sin(t)).toFixed(2)}`;
+}
+function sector(a0, a1) {
+  const { r0, r1 } = RING;
+  return `M${polar(r1, a0)}A${r1} ${r1} 0 0 1 ${polar(r1, a1)}L${polar(r0, a1)}A${r0} ${r0} 0 0 0 ${polar(r0, a0)}Z`;
+}
+function handAngle(minutes) { return (minutes / 1440) * 360; }
+
+function ringHtml(vals, date, qid) {
+  const { c, r0, r1 } = RING;
+  const now = kyivNow();
+  const today = date === now.date;
+  let segs = '';
+  for (let i = 0; i < SLOTS; i++) {
+    const v = vals ? vals[i] : null;
+    segs += `<path class="seg v${v ?? 'x'}" d="${sector(i * 7.5, (i + 1) * 7.5)}"><title>${fmt(i)}–${fmt(i + 1)} · ${esc(STATE_LABEL[v] ?? 'немає даних')}</title></path>`;
+  }
+  const hours = [0, 6, 12, 18].map((h) => `<text class="hr" x="${polar(r0 - 9, h * 15).split(' ')[0]}" y="${polar(r0 - 9, h * 15).split(' ')[1]}">${h}</text>`).join('');
+  const hand = today
+    ? `<g class="hand" transform="rotate(${handAngle(now.minutes).toFixed(1)} ${c} ${c})"><line x1="${c}" y1="${c - r0 + 3}" x2="${c}" y2="${c - r1 - 5}"/><circle cx="${c}" cy="${c - r1 - 6}" r="3"/></g>`
+    : '';
+  let center;
+  if (today) {
+    const st = statusFor(vals, now.minutes);
+    center = `<div class="ring-center ${st.cls}" data-ring="${esc(qid)}"><b>${esc(st.big)}</b><span>${esc(st.small)}</span></div>`;
+  } else {
+    const off = offMinutes(vals);
+    center = vals
+      ? `<div class="ring-center"><b>${off ? esc(dur(off)) : 'Без вимкнень'}</b><span>${off ? 'без світла за добу' : ddmm(date)}</span></div>`
+      : '<div class="ring-center"><b>—</b><span>немає графіка</span></div>';
+  }
+  return `<div class="ring"><svg viewBox="0 0 180 180" role="img" aria-label="Графік на добу ${esc(qid)}">${segs}${hours}${hand}</svg>${center}</div>`;
 }
 
 /* ===================== рендер ===================== */
-
-function barHtml(vals, date) {
-  const now = kyivNow();
-  const nowSlot = date === now.date ? Math.floor(now.minutes / 30) : -1;
-  let cells = '';
-  for (let i = 0; i < SLOTS; i++) {
-    const v = vals ? vals[i] : null;
-    const cls = `c v${v ?? 'x'}${i === nowSlot ? ' now' : ''}`;
-    cells += `<i class="${cls}" data-slot="${i}" title="${fmt(i)}–${fmt(i + 1)} · ${esc(STATE_LABEL[v] ?? 'немає даних')}"></i>`;
-  }
-  return `<div class="bar" data-date="${date}">${cells}</div>
-    <div class="axis"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>`;
-}
 
 function winsHtml(vals) {
   if (!vals) return '<ul class="wins"><li>Графік на цю дату не опубліковано</li></ul>';
@@ -302,11 +342,11 @@ function winsHtml(vals) {
   if (!ws.length) return '<ul class="wins"><li class="none">Відключень не заплановано</li></ul>';
   return `<ul class="wins">${ws.map((w) => {
     if (w.type === 'maybe') {
-      return `<li class="maybe"><b>${fmt(w.from)} – ${fmt(w.to)}</b><span class="tag">можливе відключення</span></li>`;
+      return `<li class="maybe"><b>${fmt(w.from)}–${fmt(w.to)}</b><span class="tag2">можливе відключення</span></li>`;
     }
     const core = w.coreFrom >= 0 && (w.coreFrom !== w.from || w.coreTo !== w.to)
       ? `<small>повністю без світла ${fmt(w.coreFrom)}–${fmt(w.coreTo)}, ще до 30 хв — перемикання на початку й наприкінці</small>` : '';
-    return `<li class="off"><b>${fmt(w.from)} – ${fmt(w.to)}</b><span class="tag">без світла</span>${core}</li>`;
+    return `<li class="off"><b>${fmt(w.from)}–${fmt(w.to)}</b><span class="tag2">без світла</span>${core}</li>`;
   }).join('')}</ul>`;
 }
 
@@ -320,22 +360,35 @@ function housesHtml(hits, query) {
   const all = [];
   for (const h of hits) for (const x of h.entry.houses) if (!all.includes(x)) all.push(x);
   if (!all.length) return '<div class="houses">Номери будинків не вказані — у переліку вулиця загалом</div>';
-  return `<div class="houses">Будинки: ${all.map((x) => (query && normHouse(x) === query ? `<span class="hl">${esc(x)}</span>` : `<b>${esc(x)}</b>`)).join(', ')}</div>`;
+  return `<div class="houses">Будинки: ${sortHouses(all).map((x) => (query && normHouse(x) === query ? `<span class="hl">${esc(x)}</span>` : `<b>${esc(x)}</b>`)).join(', ')}</div>`;
 }
 
-function renderCard(g, house) {
-  const e = displayEntry(g.hits);
+/** Блок однієї підчерги: циферблат + стан + вікна відключень. */
+function sqHtml(qid, sub, extra) {
+  const vals = rowVals(state.date, qid);
   const now = kyivNow();
-  const isToday = state.date === now.date;
+  const st = state.date === now.date ? statusFor(vals, now.minutes) : null;
+  return `<div class="sq">
+    ${ringHtml(vals, state.date, qid)}
+    <div class="sq-info">
+      <div class="sq-top"><span class="tag">${esc(qid)}</span><span class="sq-title">черга ${esc(qid.split('-')[0])}${sub ? ` · ${esc(sub)}` : ''}</span></div>
+      ${st ? `<div class="status ${st.cls}" data-qid="${esc(qid)}">${esc(st.text)}</div>` : ''}
+      ${winsHtml(vals)}
+      ${extra || ''}
+    </div>
+  </div>`;
+}
 
+function renderCard(g, house, opts = {}) {
+  const e = displayEntry(g.hits);
   let title = esc(`${e.type ? e.type + ' ' : ''}${e.name}`);
-  let flag = '';
+  const flags = [];
   if (house && g.level === 'exact') title += `, ${esc(g.matched)}`;
-  if (g.level === 'close') flag = `<span class="flag warn">Будинку «${esc(house)}» у переліку немає, знайдено схожий номер: ${esc(g.matched)}</span>`;
-  if (g.level === 'street') flag = '<span class="flag">Номери будинків не вказані — у переліку вулиця загалом (може бути частково)</span>';
-  if (g.level === 'object') flag = '<span class="flag">Згадка в переліку без номера будинку</span>';
+  if (g.level === 'close') flags.push(`<span class="flag warn">Будинку «${esc(house)}» у переліку немає, знайдено схожий номер: ${esc(g.matched)}</span>`);
+  if (g.level === 'street') flags.push('<span class="flag">Номери будинків не вказані — у переліку вулиця загалом (може бути частково)</span>');
+  if (g.level === 'object') flags.push('<span class="flag">Згадка в переліку без номера будинку</span>');
   const notes = [...new Set(g.hits.map((h) => h.entry.note).filter(Boolean))];
-  if (notes.length) flag += ` <span class="flag">У переліку: «${esc(notes.join(', '))}»</span>`;
+  if (notes.length) flags.push(`<span class="flag">У переліку: «${esc(notes.join(', '))}»</span>`);
 
   const bySq = new Map();
   for (const h of g.hits) {
@@ -343,58 +396,113 @@ function renderCard(g, house) {
     bySq.get(h.qid).push(h);
   }
   const sqs = [...bySq.keys()].sort((a, b) => state.order[a] - state.order[b]);
-  const multi = sqs.length > 1
-    ? `<span class="flag">Адреса є в ${sqs.length} підчергах — будинок може живитися від кількох ліній, діють обидва графіки</span>` : '';
+  if (sqs.length > 1) flags.push(`<span class="flag">Адреса є в ${sqs.length} підчергах — будинок може живитися від кількох ліній, діють обидва графіки</span>`);
+
+  const saved = opts.savedUid ? { uid: opts.savedUid } : savedFound(g.id);
+  const pin = opts.savedUid
+    ? `<button type="button" class="pin" aria-pressed="true" data-remove="${esc(opts.savedUid)}" title="Прибрати з «Моїх адрес»">★ Моя адреса</button>`
+    : `<button type="button" class="pin" aria-pressed="${saved ? 'true' : 'false'}" data-save="${esc(g.id)}">${saved ? '★ Збережено' : '☆ Зберегти'}</button>`;
 
   const sections = sqs.map((qid) => {
     const hs = bySq.get(qid);
     const rows = [...new Set(hs.map((h) => h.row))];
-    const vals = rowVals(state.date, qid);
-    const st = isToday ? statusFor(vals, now.minutes) : null;
     const raw = rows.map((r) => esc(r.text)).join('\n\n');
-    return `<div class="sq">
-      <div class="sq-top">
-        <span class="sq-badge">${esc(qid)}</span>
-        <div class="sq-title">Черга ${esc(qid.split('-')[0])}, підчерга ${esc(qid)}<small>${esc(rowsLabel(rows))}</small></div>
-      </div>
-      ${st ? `<div class="status ${st.cls}" data-qid="${esc(qid)}">${esc(st.text)}</div>` : ''}
-      ${winsHtml(vals)}
-      ${barHtml(vals, state.date)}
-      ${!house || g.level === 'close' ? housesHtml(hs, house) : ''}
-      <details><summary>Повний перелік адрес цієї лінії</summary><div class="raw">${raw}</div></details>
-    </div>`;
+    const extra = `${!house || g.level === 'close' ? housesHtml(hs, house) : ''}
+      <details class="raw-box"><summary>Повний перелік адрес цієї лінії</summary><div class="raw">${raw}</div></details>`;
+    return sqHtml(qid, rowsLabel(rows), extra);
   }).join('');
 
   return `<article class="card">
-    <div class="card-head"><h3>${title}</h3><div class="loc">${esc(e.loc)}</div>${flag}${multi ? ' ' + multi : ''}</div>
+    <div class="card-head"><h3>${title}</h3>${pin}<div class="loc">${esc(e.loc)}</div>${flags.length ? `<div class="flags">${flags.join('')}</div>` : ''}</div>
     ${sections}
   </article>`;
 }
 
+function renderManual(m) {
+  return `<article class="card">
+    <div class="card-head"><h3>${esc(m.title)}</h3>
+      <button type="button" class="pin" aria-pressed="true" data-remove="${esc(m.uid)}" title="Прибрати з «Моїх адрес»">★ Моя адреса</button>
+      <div class="loc">${esc(m.loc || 'населений пункт не вказано')}</div>
+      <div class="flags"><span class="flag warn">Додано вручну: підчергу ${esc(m.qid)} вказали ви — в переліках ДПЕМ цієї адреси немає</span></div>
+    </div>
+    ${sqHtml(m.qid, 'вказано вручну', '')}
+  </article>`;
+}
+
+function renderMineCards() {
+  return state.mine.map((m) => {
+    if (m.kind === 'manual') return renderManual(m);
+    const g = search(m.q).cards.find((c) => c.id === m.id);
+    if (!g) {
+      return `<div class="miss"><b>${esc(m.title)}</b>: цієї адреси більше немає в переліках ДПЕМ (запит «${esc(m.q)}»).
+        <button type="button" class="pin" data-remove="${esc(m.uid)}">Прибрати</button></div>`;
+    }
+    return renderCard(g, parseQuery(m.q).house, { savedUid: m.uid });
+  }).join('');
+}
+
+function adderHtml(prefill, open) {
+  const opts = state.data.subqueues.map((q) => `<option value="${esc(q)}">${esc(q)}</option>`).join('');
+  return `<details class="adder"${open ? ' open' : ''}>
+    <summary>＋ Додати адресу вручну</summary>
+    <p>Якщо вашої адреси немає в переліках ДПЕМ, але ви знаєте свою підчергу (з рахунку, Viber/Telegram-бота ДПЕМ
+      або від диспетчера) — додайте її, і графік показуватиметься в «Моїх адресах». Зберігається лише в цьому браузері.</p>
+    <form id="add-form" autocomplete="off">
+      <label>Адреса<input name="title" required maxlength="80" placeholder="напр. Островського 7а" value="${esc(prefill)}"></label>
+      <label>Населений пункт<input name="loc" maxlength="60" placeholder="необов'язково"></label>
+      <label>Підчерга<select name="qid" required><option value="">—</option>${opts}</select></label>
+      <button type="submit">Зберегти</button>
+    </form>
+  </details>`;
+}
+
+function missesHtml(misses, house) {
+  return misses.map((m) => {
+    const e = displayEntry(m.hits);
+    return `<div class="miss"><b>${esc(`${e.type ? e.type + ' ' : ''}${e.name}`)}</b> (${esc(e.loc)}):
+      будинку <b>${esc(house)}</b> у переліках ГПВ немає. Є: ${esc(sortHouses(m.houses).join(', '))}.</div>`;
+  }).join('');
+}
+
 function renderResults() {
   const box = $('#results');
-  const q = state.query.trim();
   if (!state.data) return;
+  const q = state.query.trim();
+  state.cards = [];
+
   if (!q) {
-    box.innerHTML = `<div class="hint"><p>Почніть вводити вулицю й номер будинку — можна скорочено, наприклад «Шев 10».</p>
-      <div class="examples">${EXAMPLES.map((x) => `<button type="button" data-q="${esc(x)}">${esc(x)}</button>`).join('')}</div></div>`;
+    const mine = state.mine.length
+      ? `<div class="sec-title">Мої адреси</div>${renderMineCards()}`
+      : '';
+    box.innerHTML = `${mine}
+      <div class="hint"><p>${state.mine.length ? 'Шукайте іншу адресу:' : 'Почніть вводити вулицю й номер будинку — можна скорочено, наприклад «Шев 10». Знайдену адресу можна зберегти ☆, і вона показуватиметься тут одразу.'}</p>
+      <div class="examples">${EXAMPLES.map((x) => `<button type="button" data-q="${esc(x)}">${esc(x)}</button>`).join('')}</div></div>
+      ${adderHtml('', state.addOpen)}`;
     return;
   }
+
   const res = search(q);
+  state.cards = res.cards;
+  const manual = res.words.length
+    ? state.mine.filter((m) => m.kind === 'manual' && wordsMatch(res.words, words(`${m.title} ${m.loc || ''}`)))
+    : [];
+  const parts = [];
+  parts.push(...manual.map(renderManual));
   if (res.noWords) {
-    box.innerHTML = '<div class="hint"><p>Додайте назву вулиці (хоча б перші літери), наприклад «Шев 10».</p></div>';
-    return;
+    parts.push('<div class="hint"><p>Додайте назву вулиці (хоча б перші літери), наприклад «Шев 10».</p></div>');
+  } else {
+    parts.push(missesHtml(res.misses, res.house));
+    if (res.locOnly) parts.push('<div class="hint"><p>Вулицю не вказано — показано всі адреси населеного пункту.</p></div>');
+    if (res.total > res.cards.length) parts.push(`<div class="hint"><p>Показано ${res.cards.length} з ${res.total} збігів — уточніть запит.</p></div>`);
+    parts.push(...res.cards.map((g) => renderCard(g, res.house)));
+    if (!res.cards.length && !manual.length && !res.misses.length) {
+      parts.push(`<div class="hint"><p>За запитом «${esc(q)}» у переліках ДПЕМ нічого немає.</p>
+        <p>Спробуйте коротше (перші 3–4 літери вулиці) або без номера. Якщо адреси немає в переліках, а підчергу ви знаєте — додайте її вручну нижче.</p></div>`);
+    }
   }
-  const misses = missesHtml(res.misses, res.house);
-  if (!res.cards.length) {
-    box.innerHTML = misses || `<div class="hint"><p>Нічого не знайдено за запитом «${esc(q)}».</p>
-      <p>Спробуйте коротше (перші 3–4 літери вулиці) або без номера будинку. Якщо адреси немає в переліках — вона може не входити в жодну чергу ГПВ.</p></div>`;
-    return;
-  }
-  let head = misses;
-  if (res.locOnly) head = `<div class="hint"><p>Вулицю не вказано — показано всі адреси населеного пункту.</p></div>`;
-  if (res.total > res.cards.length) head += `<div class="hint"><p>Показано ${res.cards.length} з ${res.total} збігів — уточніть запит.</p></div>`;
-  box.innerHTML = head + res.cards.map((g) => renderCard(g, res.house)).join('');
+  const nothing = !res.cards.length && !manual.length;
+  parts.push(adderHtml(nothing ? q : '', state.addOpen || nothing));
+  box.innerHTML = parts.join('');
 }
 
 function renderDays() {
@@ -417,18 +525,26 @@ function renderDays() {
 
 function renderOverview() {
   const sch = schedule(state.date);
-  $('#overview-title').textContent = `Усі черги на ${ddmm(state.date)}`;
-  if (!sch) { $('#overview').innerHTML = '<div class="empty">Графік на цю дату не опубліковано.</div>'; return; }
-  $('#overview').innerHTML = state.data.subqueues.map((qid) => {
+  $('#overview-title').textContent = `Усі черги · ${ddmm(state.date)}`;
+  if (!sch) { $('#overview').innerHTML = '<div class="hm"><div class="empty">Графік на цю дату не опубліковано.</div></div>'; return; }
+  const hit = new Set(state.cards.flatMap((g) => g.hits.map((h) => h.qid)));
+  const now = kyivNow();
+  const rows = state.data.subqueues.map((qid) => {
     const vals = sch.rows[qid];
     const ws = windowsOf(vals);
     const off = ws.filter((w) => w.type === 'off').map((w) => `${fmt(w.from)}–${fmt(w.to)}`);
     const maybe = ws.filter((w) => w.type === 'maybe').map((w) => `${fmt(w.from)}–${fmt(w.to)}`);
-    const times = [off.length ? off.join(', ') : 'без відключень', maybe.length ? `<span class="m">можливо: ${maybe.join(', ')}</span>` : '']
-      .filter(Boolean).join(' · ');
-    return `<div class="ov-row${off.length ? '' : ' dim'}"><span class="sq-badge">${esc(qid)}</span>
-      <div class="ov-times">${times}</div>${barHtml(vals, state.date).replace(/<div class="axis">[\s\S]*<\/div>/, '')}</div>`;
+    const mins = offMinutes(vals);
+    const cells = vals.map((v, i) => `<i class="c v${v ?? 'x'}" title="${esc(qid)} · ${fmt(i)}–${fmt(i + 1)} · ${esc(STATE_LABEL[v] ?? 'немає даних')}"></i>`).join('');
+    const times = [off.length ? off.join(', ') : 'без відключень', maybe.length ? `можливо ${maybe.join(', ')}` : ''].filter(Boolean).join(' · ');
+    return `<div class="hm-row${mins ? '' : ' dim'}${hit.has(qid) ? ' hit' : ''}">
+      <span class="hm-lab">${esc(qid)}</span><div class="hm-cells">${cells}</div><span class="hm-sum">${mins ? esc(durShort(mins)) : '—'}</span>
+      <div class="hm-times">${esc(times)}</div></div>`;
   }).join('');
+  const nowLine = state.date === now.date ? `<div class="hm-now" style="--now:${(now.minutes / 1440).toFixed(4)}"></div>` : '';
+  $('#overview').innerHTML = `<div class="hm">
+    <div class="hm-hours"><span></span><div><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div><span class="sumh" title="без світла за добу">вимк.</span></div>
+    ${rows}${nowLine}</div>`;
 }
 
 function renderMeta() {
@@ -436,14 +552,14 @@ function renderMeta() {
   const sch = schedule(state.date);
   const t = (iso) => new Intl.DateTimeFormat('uk-UA', { timeZone: TZ, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(iso));
   const parts = [];
-  if (sch?.saved_at) parts.push(`Графік на ${ddmm(sch.date)} оновлено на сайті ${ddmm(sch.saved_at.slice(0, 10))} о ${sch.saved_at.slice(11, 16)}`);
+  if (sch?.saved_at) parts.push(`Графік на ${ddmm(sch.date)} оновлено на сайті ДПЕМ ${ddmm(sch.saved_at.slice(0, 10))} о ${sch.saved_at.slice(11, 16)}`);
   if (d.fetched_at) parts.push(`дані отримано ${t(d.fetched_at)}`);
   $('#meta').innerHTML = `${esc(parts.join(' · '))} · <button type="button" id="refresh">оновити</button>`;
   const n = $('#notice');
   const ageMin = d.fetched_at ? (Date.now() - Date.parse(d.fetched_at)) / 60000 : 0;
   if (d.stale && d.error) {
     n.hidden = false;
-    n.innerHTML = `Не вдалося оновити дані з сайту ДПЕМ — показано збережену копію. <button type="button" id="retry">Спробувати ще</button>`;
+    n.innerHTML = 'Не вдалося оновити дані з сайту ДПЕМ — показано збережену копію. <button type="button" id="retry">Спробувати ще</button>';
   } else if (ageMin > STALE_AFTER_MIN) {
     n.hidden = false;
     n.innerHTML = `Дані могли застаріти: останнє оновлення ${esc(t(d.fetched_at))}. Звірте з <a href="https://info.dpem.mk.ua/off_graf.html" target="_blank" rel="noopener">сайтом ДПЕМ</a>.`;
@@ -455,23 +571,30 @@ function renderAll() {
   renderResults();
   renderOverview();
   renderMeta();
+  tickClock();
 }
 
-/** Щохвилини оновлюємо «зараз» без повного перерендеру (щоб не закривались розгорнуті списки). */
+function tickClock() { $('#clock').textContent = kyivNow().hhmm; }
+
+/** Щопівхвилини оновлюємо «зараз» без повного перерендеру (щоб не закривались розгорнуті списки). */
 function tick() {
+  tickClock();
   if (!state.data) return;
   const now = kyivNow();
   if (state.date !== now.date) return;
-  const slot = Math.floor(now.minutes / 30);
-  document.querySelectorAll('.bar').forEach((bar) => {
-    bar.querySelectorAll('.c.now').forEach((c) => c.classList.remove('now'));
-    bar.querySelector(`[data-slot="${slot}"]`)?.classList.add('now');
+  const ang = handAngle(now.minutes).toFixed(1);
+  document.querySelectorAll('.ring .hand').forEach((h) => h.setAttribute('transform', `rotate(${ang} ${RING.c} ${RING.c})`));
+  document.querySelectorAll('.ring-center[data-ring]').forEach((el) => {
+    const st = statusFor(rowVals(state.date, el.dataset.ring), now.minutes);
+    el.className = `ring-center ${st.cls}`;
+    el.innerHTML = `<b>${esc(st.big)}</b><span>${esc(st.small)}</span>`;
   });
   document.querySelectorAll('.status[data-qid]').forEach((el) => {
     const st = statusFor(rowVals(state.date, el.dataset.qid), now.minutes);
     el.className = `status ${st.cls}`;
     el.textContent = st.text;
   });
+  $('.hm-now')?.style.setProperty('--now', (now.minutes / 1440).toFixed(4));
 }
 
 /* ===================== дані ===================== */
@@ -505,25 +628,64 @@ async function load(force = false) {
 
 let debounce;
 const input = $('#q');
+function setQuery(v) {
+  state.query = v;
+  try { localStorage.setItem('gpv.q', v); } catch { /* приватний режим */ }
+  renderResults();
+  renderOverview();
+}
 input.addEventListener('input', () => {
   clearTimeout(debounce);
-  debounce = setTimeout(() => {
-    state.query = input.value;
-    try { localStorage.setItem('gpv.q', input.value); } catch { /* приватний режим */ }
-    renderResults();
-  }, 120);
+  debounce = setTimeout(() => setQuery(input.value), 120);
 });
 
 document.addEventListener('click', (ev) => {
   const ex = ev.target.closest('[data-q]');
-  if (ex) { input.value = ex.dataset.q; state.query = ex.dataset.q; renderResults(); input.focus(); return; }
+  if (ex) { input.value = ex.dataset.q; setQuery(ex.dataset.q); input.focus(); return; }
   const day = ev.target.closest('#days [data-date]');
   if (day) { state.date = day.dataset.date; renderAll(); return; }
+  const save = ev.target.closest('[data-save]');
+  if (save) {
+    const existing = savedFound(save.dataset.save);
+    if (existing) state.mine = state.mine.filter((m) => m !== existing);
+    else {
+      const g = state.cards.find((c) => c.id === save.dataset.save);
+      if (g) state.mine.push({ uid: uid(), kind: 'found', id: g.id, q: state.query.trim(), title: `${cardTitle(g)}${g.matched ? ', ' + g.matched : ''}` });
+    }
+    saveMine();
+    renderResults();
+    return;
+  }
+  const rm = ev.target.closest('[data-remove]');
+  if (rm) {
+    state.mine = state.mine.filter((m) => m.uid !== rm.dataset.remove);
+    saveMine();
+    renderResults();
+    return;
+  }
   if (ev.target.closest('#refresh, #retry')) load(true);
+});
+
+document.addEventListener('toggle', (ev) => {
+  if (ev.target.classList?.contains('adder')) state.addOpen = ev.target.open;
+}, true);
+
+document.addEventListener('submit', (ev) => {
+  if (ev.target.id !== 'add-form') return;
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  const title = String(f.get('title') || '').trim();
+  const qid = String(f.get('qid') || '');
+  if (!title || !state.data.subqueues.includes(qid)) return;
+  state.mine.push({ uid: uid(), kind: 'manual', title, loc: String(f.get('loc') || '').trim(), qid });
+  saveMine();
+  state.addOpen = false;
+  renderResults();
 });
 
 try { input.value = localStorage.getItem('gpv.q') || ''; } catch { /* ignore */ }
 state.query = input.value;
+tickClock();
 load();
 setInterval(() => load(), REFRESH_MS);
 setInterval(tick, 30 * 1000);
