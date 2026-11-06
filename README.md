@@ -17,6 +17,9 @@ GitHub Actions (`.github/workflows/pages.yml`) кожні ~10 хв забира�
 
 ## Програма для Windows (KolySvitlo.exe)
 
+**[Завантажити KolySvitlo.exe](https://github.com/raitodano/koly-svitlo/releases/latest/download/KolySvitlo.exe)**
+(остання версія з [Releases](https://github.com/raitodano/koly-svitlo/releases)).
+
 Один файл, Python ставити не потрібно. Запуск — подвійний клік: відкриється браузер,
 а у вікні програми буде адреса для телефона, наприклад `http://192.168.1.3:8765`
 (телефон має бути в тій самій Wi-Fi мережі). При першому запуску Windows спитає
@@ -30,6 +33,17 @@ powershell -ExecutionPolicy Bypass -File build_exe.ps1
 
 Результат — `dist\KolySvitlo.exe`. Параметри: `--port 8765`, `--local-only`
 (лише цей комп'ютер), `--no-browser`.
+
+Новий реліз: відправити тег `v*` — GitHub Actions (`.github/workflows/release.yml`)
+збере exe на Windows, перевірить запуск і прикріпить файл до релізу:
+
+```bash
+git tag v1.0.1
+```
+
+```bash
+git push origin v1.0.1
+```
 
 ## Запуск з коду
 
