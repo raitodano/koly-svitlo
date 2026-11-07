@@ -1,5 +1,6 @@
 """Генерує tools/icon.ico (блискавка на темному квадраті) без сторонніх бібліотек."""
 import struct
+import sys
 import zlib
 from pathlib import Path
 
@@ -17,8 +18,11 @@ def inside(poly, x, y):
     return c
 
 
-def render(size, ss=4):
-    radius = size * 0.22
+def render(size, ss=4, radius_k=0.22, scale=1.0):
+    """PNG size×size: блискавка на заокругленому квадраті. scale < 1 — блискавка менша
+    (для «maskable» іконок Android, які обрізаються колом)."""
+    radius = size * radius_k
+    off = 12 * (1 - scale)
     rows = []
     for py in range(size):
         row = bytearray([0])  # PNG filter: none
@@ -30,9 +34,10 @@ def render(size, ss=4):
                     # заокруглений квадрат
                     cx = min(max(x, radius), size - radius)
                     cy = min(max(y, radius), size - radius)
-                    if (x - cx) ** 2 + (y - cy) ** 2 > radius ** 2:
+                    if radius and (x - cx) ** 2 + (y - cy) ** 2 > radius ** 2:
                         continue
-                    col = FG if inside(BOLT, x * 24 / size, y * 24 / size) else BG
+                    bx, by = (x * 24 / size - off) / scale, (y * 24 / size - off) / scale
+                    col = FG if inside(BOLT, bx, by) else BG
                     for k in range(4):
                         acc[k] += col[k]
             row += bytes(v // (ss * ss) for v in acc)
@@ -46,7 +51,24 @@ def render(size, ss=4):
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", raw) + chunk(b"IEND", b"")
 
 
+def pwa_icons():
+    """static/icons/*.png — для «Додати на головний екран» (manifest.webmanifest, iPhone)."""
+    out = Path(__file__).resolve().parent.parent / "static" / "icons"
+    out.mkdir(exist_ok=True)
+    for name, size, kw in [
+        ("icon-180.png", 180, {"radius_k": 0}),          # iPhone сам заокруглює
+        ("icon-192.png", 192, {}),
+        ("icon-512.png", 512, {"ss": 2}),
+        ("icon-maskable-512.png", 512, {"ss": 2, "radius_k": 0, "scale": 0.72}),
+    ]:
+        (out / name).write_bytes(render(size, **kw))
+        print(out / name)
+
+
 def main():
+    if "--pwa" in sys.argv:
+        pwa_icons()
+        return
     sizes = [16, 32, 48, 256]
     pngs = [render(s) for s in sizes]
     out = struct.pack("<HHH", 0, 1, len(sizes))

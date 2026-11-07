@@ -991,14 +991,329 @@ function maybeAutoVerify() {
   if (ageMin > AUTO_VERIFY_AFTER_MIN && Date.now() - state.lastAutoVerify > 15 * 60 * 1000) verify(true);
 }
 
+/* ===================== Персоналізація: теми ===================== */
+
+const THEME_KEY = 'gpv.theme';
+const THEMES = [
+  ['auto', 'Стандартна', 'як у системі: світла чи темна'],
+  ['light', 'Світла', 'завжди світла'],
+  ['dark', 'Темна', 'завжди темна'],
+  ['oled', 'Нічна', 'чорне тло, береже батарею'],
+  ['contrast', 'Контрастна', 'для сонця й слабкого зору'],
+  ['sepia', 'Папір', 'тепла, м’яка для очей'],
+  ['sea', 'Морська ніч', 'глибокий синій'],
+  ['mint', 'М’ята', 'світла, прохолодна'],
+];
+const currentTheme = () => { try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch { return 'auto'; } };
+
+function applyTheme(t) {
+  if (t === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', t);
+  try { localStorage.setItem(THEME_KEY, t); } catch { /* приватний режим */ }
+  const mastColor = getComputedStyle(document.documentElement).getPropertyValue('--mast').trim();
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', mastColor || '#16171b');
+}
+
+function themePreview(id) {
+  const body = `<div class="tp-mast"><i></i><b></b></div><div class="tp-body"><div class="tp-card">
+    <div class="tp-bar"><span></span><span></span><span class="s"></span><span class="d"></span><span class="d"></span><span class="d"></span><span class="s"></span><span></span><span class="m"></span><span class="m"></span><span></span><span></span></div>
+    <div class="tp-line"></div></div></div>`;
+  if (id === 'auto') return `<span class="theme-prev split"><div data-theme="light">${body}</div><div data-theme="dark">${body}</div></span>`;
+  return `<span class="theme-prev" data-theme="${id}">${body}</span>`;
+}
+
+function renderThemes() {
+  const cur = currentTheme();
+  $('#themes').innerHTML = THEMES.map(([id, name, hint]) => `<label class="theme-card">
+    <input type="radio" name="theme" value="${id}"${id === cur ? ' checked' : ''}>${themePreview(id)}
+    <span class="theme-name">${esc(name)}<small>${esc(hint)}</small></span></label>`).join('');
+}
+
+/* ===================== вкладки: графік / Персоналізація ===================== */
+
+const isPersonal = () => location.hash === '#personal';
+function renderView() {
+  const p = isPersonal();
+  document.body.classList.toggle('view-personal', p);
+  $('#personal').hidden = !p;
+  $('#pers-toggle').setAttribute('aria-current', p ? 'page' : 'false');
+  if (p) { renderThemes(); renderDistPick(); renderWidgetBox(); window.scrollTo({ top: 0 }); }
+}
+function leavePersonal() {
+  if (!isPersonal()) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  renderView();
+}
+
+/* ===================== мікрорайони ===================== */
+
+const DIST_KEY = 'gpv.districts';
+state.distSel = new Set(readJson(DIST_KEY, []));
+state.osmDistricts = null;   // з districts.json (межі з OpenStreetMap)
+state.dist = new Map();      // id → { name, kind, qids: Map(qid → {houses: Map(вулиця → Set), whole: Set, objects: Set}) }
+state.distUnknown = 0;
+
+const TYPE_WORDS = new Set(['вулиця', 'вул', 'бульвар', 'бул', 'бр', 'проспект', 'просп', 'прт', 'провулок', 'пров',
+  'площа', 'пл', 'тупик', 'туп', 'мікрорайон', 'мкр', 'майдан'].map(fold));
+const osmKey = (name) => words(name).filter((w) => !TYPE_WORDS.has(w)).map((w) => w.slice(0, 5)).join(' ');
+const MAIN_CITY = 'Південноукраїнськ';
+
+async function loadDistricts() {
+  try {
+    const r = await fetch('districts.json', { cache: 'no-cache' });
+    state.osmDistricts = (await r.json()).districts || [];
+  } catch { state.osmDistricts = []; }
+  buildDistricts();
+  renderDistricts();
+  if (isPersonal()) renderDistPick();
+}
+
+/** Розкладає адреси з переліків ДПЕМ по мікрорайонах (і населених пунктах громади). */
+function buildDistricts() {
+  state.dist = new Map();
+  state.distUnknown = 0;
+  if (!state.data || !state.osmDistricts) return;
+  const exact = new Map(), byStreet = new Map(), streets = new Map();
+  for (const d of state.osmDistricts) {
+    state.dist.set(d.id, { id: d.id, name: d.name, kind: 'city', qids: new Map() });
+    for (const [st, hs] of Object.entries(d.houses)) {
+      const k = osmKey(st);
+      for (const h of hs) {
+        const nh = normHouse(h);
+        if (!exact.has(`${k}|${nh}`)) exact.set(`${k}|${nh}`, d.id);
+        const n = parseInt(nh, 10);
+        if (n) { if (!byStreet.has(k)) byStreet.set(k, []); byStreet.get(k).push({ n, d: d.id }); }
+      }
+    }
+    for (const st of d.streets) {
+      const k = osmKey(st);
+      if (!streets.has(k)) streets.set(k, new Set());
+      streets.get(k).add(d.id);
+    }
+  }
+  // будинок → мікрорайон: точний номер, номер без літери/дробу, найближчий сусід на тій самій вулиці
+  const houseDistrict = (k, raw) => {
+    const nh = normHouse(raw);
+    if (exact.has(`${k}|${nh}`)) return exact.get(`${k}|${nh}`);
+    const r = nh.match(/^(\d+)-(\d+)$/);
+    if (r) for (let n = +r[1]; n <= +r[2]; n++) if (exact.has(`${k}|${n}`)) return exact.get(`${k}|${n}`);
+    const base = houseBase(nh);
+    if (base && exact.has(`${k}|${base}`)) return exact.get(`${k}|${base}`);
+    const n = parseInt(base, 10);
+    const near = (byStreet.get(k) || []).map((x) => ({ ...x, dd: Math.abs(x.n - n) + (x.n % 2 === n % 2 ? 0 : 2.5) }))
+      .filter((x) => x.dd <= 6).sort((a, b) => a.dd - b.dd)[0];
+    return near ? near.d : null;
+  };
+  const slot = (id, name, kind, qid) => {
+    if (!state.dist.has(id)) state.dist.set(id, { id, name, kind, qids: new Map() });
+    const q = state.dist.get(id).qids;
+    if (!q.has(qid)) q.set(qid, { houses: new Map(), whole: new Set(), objects: new Set() });
+    return q.get(qid);
+  };
+  for (const q of state.data.queues) {
+    for (const row of q.rows) {
+      for (const e of row.entries) {
+        const best = state.best.get(`${e.loc}|${streetKey(e.name)}`) || e;
+        if (!e.loc.includes(MAIN_CITY)) { // села й селища громади — окремими «районами»
+          const s = slot(`loc:${e.loc}`, shortLoc(e.loc), 'loc', q.id);
+          if (e.kind === 'street') {
+            if (e.houses.length) e.houses.forEach((h) => (s.houses.get(fullName(best)) || s.houses.set(fullName(best), new Set()).get(fullName(best))).add(h));
+            else s.whole.add(fullName(best));
+          } else s.objects.add(e.name);
+          continue;
+        }
+        if (e.kind !== 'street') continue;
+        const k = streetKey(e.name);
+        if (!e.houses.length) {
+          for (const id of streets.get(k) || []) slot(id, '', 'city', q.id).whole.add(fullName(best));
+          continue;
+        }
+        for (const h of e.houses) {
+          const id = houseDistrict(k, h);
+          if (!id) { state.distUnknown++; continue; }
+          const s = slot(id, '', 'city', q.id);
+          const t = fullName(best);
+          if (!s.houses.has(t)) s.houses.set(t, new Set());
+          s.houses.get(t).add(h);
+        }
+      }
+    }
+  }
+}
+
+const distHouseCount = (d) => [...d.qids.values()].reduce((s, x) => s + [...x.houses.values()].reduce((a, b) => a + b.size, 0), 0);
+const distList = (kind) => [...state.dist.values()].filter((d) => d.kind === kind && d.qids.size)
+  .sort((a, b) => a.name.localeCompare(b.name, 'uk', { numeric: true }));
+
+function renderDistPick() {
+  const box = $('#dist-pick');
+  if (!box) return;
+  if (!state.osmDistricts || !state.data) { box.innerHTML = '<p class="pers-note">Завантажую…</p>'; return; }
+  const chip = (d) => {
+    const n = distHouseCount(d);
+    const sub = `${d.qids.size} ${d.qids.size === 1 ? 'підчерга' : d.qids.size < 5 ? 'підчерги' : 'підчерг'}${n ? ` · ${n} буд.` : ''}`;
+    return `<label class="chip"><input type="checkbox" data-dist="${esc(d.id)}"${state.distSel.has(d.id) ? ' checked' : ''}><span>${esc(d.name)}<small>${esc(sub)}</small></span></label>`;
+  };
+  const city = distList('city'), locs = distList('loc');
+  box.innerHTML = `<div class="chips">${city.map(chip).join('')}</div>
+    ${locs.length ? `<div class="chips-sub">Населені пункти громади</div><div class="chips">${locs.map(chip).join('')}</div>` : ''}
+    <p class="pers-note">Межі мікрорайонів — з <a href="https://www.openstreetmap.org/" target="_blank" rel="noopener">OpenStreetMap</a>
+    (© учасники OpenStreetMap). Будинки, яких немає на карті, віднесено за сусідніми номерами тієї ж вулиці${state.distUnknown ? `; не вдалося віднести ${state.distUnknown} адрес` : ''}.
+    Вулиці без номерів — до мікрорайонів, через які вони проходять.</p>`;
+}
+
+function renderDistricts() {
+  const box = $('#districts');
+  const sel = [...state.distSel].map((id) => state.dist.get(id)).filter(Boolean);
+  if (!state.data || !sel.length) { box.hidden = true; box.innerHTML = ''; return; }
+  const sch = schedule(state.date);
+  const now = kyivNow();
+  const today = state.date === now.date;
+  const open = new Set([...box.querySelectorAll('details[open]')].map((d) => d.dataset.did));
+  const cards = sel.map((d) => {
+    const qids = [...d.qids.keys()].sort((a, b) => state.order[a] - state.order[b]);
+    const sts = today ? qids.map((q) => statusFor(rowVals(state.date, q), now.minutes)) : [];
+    const offNow = sts.filter((s) => s.cls === 'off').length;
+    const head = today
+      ? (offNow ? `зараз без світла: <b>${offNow} з ${qids.length}</b> підчерг` : `<b>зараз світло скрізь є</b> · ${qids.length} підчерг`)
+      : `${qids.length} підчерг`;
+    const rows = qids.map((qid, i) => {
+      const x = d.qids.get(qid);
+      const vals = sch?.rows[qid];
+      const n = [...x.houses.values()].reduce((a, b) => a + b.size, 0);
+      const cells = vals ? vals.map((v) => `<i class="c v${v ?? 'x'}"></i>`).join('') : '';
+      const cnt = n ? `${n} буд.` : x.whole.size ? `${x.whole.size} вул.` : x.objects.size ? `${x.objects.size} об’єкт.` : '';
+      return `<div class="dist-row"><span class="dr-q"><i class="${today ? sts[i].cls : ''}"></i>${esc(qid)}</span>
+        <div class="hm-cells">${cells}</div><span class="dr-n">${esc(cnt)}</span>
+        <span class="dr-t">${esc(vals ? winsText(vals) : 'немає графіка')}</span></div>`;
+    }).join('');
+    const det = qids.map((qid) => {
+      const x = d.qids.get(qid);
+      const parts = [...x.houses].map(([st, hs]) => `${esc(st)} ${esc(sortHouses([...hs]).join(', '))}`);
+      if (x.whole.size) parts.push(`${[...x.whole].map(esc).join(', ')} <span class="muted">(вулиця загалом)</span>`);
+      if (x.objects.size) parts.push(`<span class="muted">${[...x.objects].map(esc).join(', ')}</span>`);
+      return `<li><b>${esc(qid)}</b>: ${parts.join('; ')}</li>`;
+    }).join('');
+    return `<article class="dist"><div class="dist-head"><h3>${esc(d.name)}</h3><span class="dist-now">${head}</span></div>
+      ${rows}<details data-did="${esc(d.id)}"${open.has(d.id) ? ' open' : ''}><summary>Які будинки в якій підчерзі</summary><ul class="dl">${det}</ul></details></article>`;
+  }).join('');
+  box.hidden = false;
+  box.className = `districts${today ? ' today' : ''}`;
+  box.style.setProperty('--now', (now.minutes / 1440).toFixed(4));
+  box.innerHTML = `<div class="sec-head"><h2>Мої мікрорайони · ${ddmm(state.date)}</h2>
+    <a href="#personal" class="link">змінити</a></div>${cards}`;
+}
+
+/* ===================== віджет на телефон ===================== */
+
+const WIDGET_KEY = 'gpv.widget';
+const APK_URL = 'https://github.com/raitodano/koly-svitlo/releases/latest/download/KolySvitlo.apk';
+const SCRIPTABLE_URL = 'scriptable/KolySvitlo.js';
+const APP = window.KolySvitloApp || null; // міст з Android-застосунку «Коли світло?»
+state.widget = readJson(WIDGET_KEY, null);
+
+function appState() {
+  if (!APP) return null;
+  try { return JSON.parse(APP.getState()); } catch { return null; }
+}
+
+/** Адреси, які можна поставити у віджет: поточний пошук, «Мої адреси», історія. */
+function widgetCandidates() {
+  const out = [], seen = new Set();
+  const add = (title, loc, qids, from) => {
+    if (!title || !qids?.length || seen.has(title)) return;
+    seen.add(title);
+    out.push({ title, loc: loc || '', qids, from });
+  };
+  if (state.query.trim() && state.cards[0] && state.lastRes) {
+    const g = state.cards[0];
+    const h = shownHouse(g, state.lastRes.house);
+    add(`${cardTitle(g)}${h ? ', ' + h : ''}`, displayEntry(g.hits).loc, qidsOf(g), 'пошук');
+  }
+  for (const m of state.mine) {
+    if (m.kind === 'manual') add(m.title, m.loc, [m.qid], 'мої адреси');
+    else {
+      const g = search(m.q).cards.find((c) => c.id === m.id);
+      if (g) add(m.title, displayEntry(g.hits).loc, qidsOf(g), 'мої адреси');
+    }
+  }
+  for (const h of state.hist) add(h.title, h.loc, h.qids, 'історія');
+  if (state.widget) add(state.widget.title, state.widget.loc, state.widget.qids, 'віджет');
+  return out;
+}
+
+const widgetParam = (w) => `${w.qids.join(',')}|${w.title}`;
+
+/** Як виглядатиме віджет зараз (той самий розрахунок, що й у застосунку/скрипті). */
+function widgetPreviewHtml(w) {
+  const now = kyivNow();
+  const sts = w.qids.map((q) => statusFor(rowVals(now.date, q), now.minutes));
+  const st = sts.find((s) => s.cls === 'off') || sts.find((s) => s.cls === 'maybe') || sts.find((s) => s.cls === 'on') || sts[0];
+  const vals = rowVals(now.date, w.qids[0]);
+  const cells = vals ? vals.map((v) => `<i class="c v${v ?? 'x'}"></i>`).join('') : '';
+  return `<div class="wg-preview ${st.cls}"><span class="wg-addr">${esc(w.title)}</span>
+    <span class="wg-big">${esc(st.big)}</span><span class="wg-small">${esc(st.small)}${w.qids.length > 1 ? ` · ${esc(w.qids.join(', '))}` : ` · ${esc(w.qids[0])}`}</span>
+    <div class="hm-cells">${cells}</div></div>`;
+}
+
+function renderWidgetBox() {
+  const box = $('#widget-box');
+  if (!box || !state.data) return;
+  const cands = widgetCandidates();
+  const w = state.widget;
+  const opts = cands.map((c, i) => `<option value="${i}"${w && c.title === w.title ? ' selected' : ''}>${esc(c.title)} — ${esc(c.qids.join(', '))}</option>`).join('');
+  const pick = `<div class="wg-pick">
+    <label>Адреса для віджета<select id="wg-select"><option value="">— оберіть —</option>${opts}</select></label>
+    ${cands.length ? '' : '<p class="pers-note">Спершу знайдіть свою адресу в пошуку — вона з’явиться тут (а також адреси з історії та «Моїх адрес»).</p>'}
+    ${w ? widgetPreviewHtml(w) : ''}
+    ${w ? `<div class="wg-param"><code id="wg-param">${esc(widgetParam(w))}</code><button type="button" class="btn" data-copy-param>Копіювати</button></div>
+      <p class="pers-note">Цей рядок — «Parameter» для віджета на iPhone.</p>` : ''}
+  </div>`;
+
+  let how;
+  const as = appState();
+  if (as) {
+    const inWidget = as.title ? `У віджеті зараз: <b>${esc(as.title)}</b> (${esc((as.qids || []).join(', '))})` : 'Адресу для віджета ще не обрано.';
+    const perm = [];
+    if (as.notify && as.canNotify === false) perm.push('сповіщення заборонені в налаштуваннях телефона');
+    if (as.notify && as.canExact === false) perm.push('немає дозволу на точні нагадування — сповіщення можуть запізнюватися');
+    how = `<div class="os"><h4>Цей застосунок</h4>
+      <div class="app-state">${inWidget}${as.lastFetch ? `<br><span class="muted">Графік оновлено ${esc(whenKyiv(as.lastFetch))}</span>` : ''}</div>
+      <p><button type="button" class="btn" data-app-set${w ? '' : ' disabled'}>Показувати у віджеті</button></p>
+      <label class="toggle"><input type="checkbox" id="app-notify"${as.notify ? ' checked' : ''}>
+        <span>Сповіщати на початку помаранчевої півгодинки — приблизно за 30 хв до того, як не стане світла</span></label>
+      <label class="toggle"><input type="checkbox" id="app-maybe"${as.notifyMaybe ? ' checked' : ''}>
+        <span>Також попереджати про можливі відключення (смугасті)</span></label>
+      ${perm.length ? `<p class="pers-note">⚠ ${esc(perm.join('; '))}. <button type="button" class="link" data-app-perm>Відкрити дозволи</button></p>` : ''}
+      <ol class="steps"><li>Оберіть адресу ліворуч і натисніть «Показувати у віджеті».</li>
+        <li>Довге натискання на порожньому місці головного екрана → «Віджети» → «Коли світло?».</li></ol></div>`;
+  } else {
+    how = `<div>
+      <div class="os" style="border:0;margin:0;padding:0"><h4>Android</h4><ol class="steps">
+        <li>Завантажте <a href="${APK_URL}">KolySvitlo.apk</a> і встановіть (телефон спитає дозвіл на встановлення з браузера).</li>
+        <li>Відкрийте «Коли світло?», знайдіть адресу й у «Персоналізації» натисніть «Показувати у віджеті», увімкніть сповіщення.</li>
+        <li>Довге натискання на головному екрані → «Віджети» → «Коли світло?». Натискання на віджет відкриває цей сайт.</li></ol></div>
+      <div class="os"><h4>iPhone</h4><ol class="steps">
+        <li>Встановіть безкоштовний застосунок <a href="https://apps.apple.com/app/scriptable/id1405459188" target="_blank" rel="noopener">Scriptable</a>.</li>
+        <li>Відкрийте <a href="${SCRIPTABLE_URL}" target="_blank" rel="noopener">скрипт віджета</a>, скопіюйте весь текст; у Scriptable — «+», вставте, назвіть «Коли світло». Запустіть один раз ▶ і дозвольте сповіщення.</li>
+        <li>Додайте на екран «Додому» віджет Scriptable, торкніться його в режимі редагування: Script — «Коли світло», Parameter — рядок ліворуч.</li></ol></div>
+      <div class="os"><h4>Просто значок</h4><p class="pers-note" style="margin:0">Меню браузера → «Додати на головний екран»: значок відкриває цей сайт (без статусу й сповіщень — сайт сам їх надсилати не може).</p></div>
+    </div>`;
+  }
+  box.innerHTML = `<div class="wg-grid">${pick}${how}</div>`;
+  box._cands = cands;
+}
+
 /* ===================== загальний рендер ===================== */
 
 function renderAll() {
   renderDays();
   renderResults();
   renderOverview();
+  renderDistricts();
   renderSync();
   tickClock();
+  if (isPersonal()) { renderDistPick(); renderWidgetBox(); }
 }
 
 function tickClock() { $('#clock').textContent = kyivNow().hhmm; }
@@ -1009,8 +1324,14 @@ function tick() {
   if (!state.data) return;
   const now = kyivNow();
   const slot = Math.floor(now.minutes / 30);
-  if (slot !== state.lastSlot) { state.lastSlot = slot; renderHistory(); } // крапки «є/немає світла»
+  if (slot !== state.lastSlot) { // крапки «є/немає світла» в історії та мікрорайонах
+    state.lastSlot = slot;
+    renderHistory();
+    renderDistricts();
+    if (isPersonal()) renderWidgetBox();
+  }
   renderSyncText();
+  $('#districts').style.setProperty('--now', (now.minutes / 1440).toFixed(4));
   if (state.date !== now.date) return;
   const ang = handAngle(now.minutes).toFixed(1);
   document.querySelectorAll('.ring .hand').forEach((h) => h.setAttribute('transform', `rotate(${ang} ${RING.c} ${RING.c})`));
@@ -1054,6 +1375,7 @@ function applyData(d) {
   if (queuesChanged) {
     state.index = buildIndex(d);
     state.best = buildBest(state.index);
+    buildDistricts();
   }
   const dates = d.schedules.map((s) => s.date);
   const today = kyivNow().date;
@@ -1090,6 +1412,7 @@ function setQuery(v) {
 }
 input.addEventListener('input', () => {
   state.focusId = null;
+  leavePersonal();
   clearTimeout(debounce);
   debounce = setTimeout(() => setQuery(input.value), 120);
 });
@@ -1104,6 +1427,7 @@ input.addEventListener('keydown', (ev) => {
 input.addEventListener('blur', () => { clearTimeout(histTimer); commitHistory('blur'); });
 
 function runQuery(q, focusId = null) {
+  leavePersonal();
   input.value = q;
   state.focusId = focusId;
   setQuery(q);
@@ -1197,6 +1521,58 @@ document.addEventListener('submit', (ev) => {
 
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load(); });
 
+/* --- Персоналізація --- */
+window.addEventListener('hashchange', renderView);
+
+document.addEventListener('change', (ev) => {
+  const t = ev.target;
+  if (t.name === 'theme') { applyTheme(t.value); return; }
+  if (t.dataset?.dist) {
+    if (t.checked) state.distSel.add(t.dataset.dist); else state.distSel.delete(t.dataset.dist);
+    writeJson(DIST_KEY, [...state.distSel]);
+    renderDistricts();
+    return;
+  }
+  if (t.id === 'wg-select') {
+    const c = $('#widget-box')._cands?.[+t.value];
+    state.widget = t.value === '' || !c ? null : { title: c.title, loc: c.loc, qids: c.qids };
+    writeJson(WIDGET_KEY, state.widget);
+    renderWidgetBox();
+    return;
+  }
+  if ((t.id === 'app-notify' || t.id === 'app-maybe') && APP) {
+    APP.setNotify($('#app-notify').checked, $('#app-maybe').checked);
+    setTimeout(renderWidgetBox, 600); // застосунок міг спитати дозвіл на сповіщення
+  }
+});
+
+document.addEventListener('click', (ev) => {
+  const t = ev.target;
+  if (t.closest('#pers-back')) { leavePersonal(); return; }
+  if (t.closest('[data-copy-param]')) {
+    const text = $('#wg-param')?.textContent || '';
+    const done = () => { t.closest('button').textContent = 'Скопійовано ✓'; };
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done, () => selectText($('#wg-param')));
+    else selectText($('#wg-param'));
+    return;
+  }
+  if (t.closest('[data-app-set]') && APP && state.widget) {
+    APP.setAddress(JSON.stringify(state.widget));
+    setTimeout(renderWidgetBox, 300);
+    return;
+  }
+  if (t.closest('[data-app-perm]') && APP) APP.openPermissions();
+});
+
+function selectText(el) {
+  if (!el) return;
+  const r = document.createRange();
+  r.selectNodeContents(el);
+  const s = getSelection();
+  s.removeAllRanges();
+  s.addRange(r);
+}
+
 // висота шапки — щоб історія ліворуч «прилипала» одразу під нею
 const mast = $('#mast');
 const setMastH = () => document.documentElement.style.setProperty('--mast-h', `${mast.offsetHeight}px`);
@@ -1204,10 +1580,15 @@ if ('ResizeObserver' in window) new ResizeObserver(setMastH).observe(mast);
 setMastH();
 
 try { input.value = localStorage.getItem('gpv.q') || ''; } catch { /* ignore */ }
+// посилання з віджета: ?q=бульвар Шевченка, 10 — одразу показати цю адресу
+const urlQ = new URLSearchParams(location.search).get('q');
+if (urlQ) input.value = urlQ.slice(0, 120);
 state.query = input.value;
+applyTheme(currentTheme());
 tickClock();
 renderHistory();
 renderSync();
-load();
+renderView();
+load().then(loadDistricts);
 setInterval(load, REFRESH_MS);
 setInterval(tick, 30 * 1000);

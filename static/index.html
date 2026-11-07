@@ -7,6 +7,13 @@
   <meta name="description" content="Пошук черги погодинних відключень (ГПВ) ДПЕМ ПрАТ «Атомсервіс» за адресою">
   <meta name="theme-color" content="#16171b">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%2316171b'/%3E%3Cpath fill='%23f4b740' d='M13 3 5 14h6l-1 7 8-11h-6z'/%3E%3C/svg%3E">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Коли світло?">
+  <!-- тема з «Персоналізації» — ще до малювання сторінки, щоб не блимало -->
+  <script>try { var t = localStorage.getItem('gpv.theme'); if (t && t !== 'auto') document.documentElement.setAttribute('data-theme', t); } catch (e) {}</script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -33,7 +40,13 @@
           <p>Графік погодинних відключень · Південноукраїнськ і громада</p>
         </div>
       </div>
-      <div class="clock" id="clock" title="Київський час"></div>
+      <div class="mast-tools">
+        <a class="pers-toggle" id="pers-toggle" href="#personal" title="Теми, мікрорайони, віджет на телефон">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/></svg>
+          <span>Персоналізація</span>
+        </a>
+        <div class="clock" id="clock" title="Київський час"></div>
+      </div>
       <label class="search" for="q">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <input id="q" type="search" placeholder="Вулиця і будинок — напр. «Шев 10»" autocomplete="off" spellcheck="false" enterkeyhint="search">
@@ -64,6 +77,34 @@
       </section>
       <div id="notice" class="notice" hidden></div>
       <section id="results" aria-live="polite"></section>
+
+      <section class="districts" id="districts" hidden></section>
+
+      <section class="personal" id="personal" hidden aria-labelledby="pers-title">
+        <div class="pers-head">
+          <h2 id="pers-title">Персоналізація</h2>
+          <button type="button" class="back" id="pers-back">← До графіка</button>
+        </div>
+
+        <div class="pers-sec">
+          <h3>Тема оформлення</h3>
+          <p class="lead">Запам’ятовується в цьому браузері.</p>
+          <div class="themes" id="themes" role="radiogroup" aria-label="Тема оформлення"></div>
+        </div>
+
+        <div class="pers-sec">
+          <h3>Мої мікрорайони</h3>
+          <p class="lead">Позначте потрібні — на головній з’явиться розбивка: які підчерги їх живлять і коли там немає світла.</p>
+          <div id="dist-pick"></div>
+        </div>
+
+        <div class="pers-sec" id="widget-sec">
+          <h3>Віджет на телефон і сповіщення</h3>
+          <p class="lead">Віджет показує, чи є світло за вашою адресою, і відкриває цей сайт. Сповіщення приходить на початку
+            помаранчевої півгодинки — перемикання, після якого вимикають світло.</p>
+          <div id="widget-box"></div>
+        </div>
+      </section>
 
       <section class="overview">
         <div class="sec-head">

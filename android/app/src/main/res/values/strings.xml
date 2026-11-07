@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Коли світло?</string>
+    <string name="widget_name">Коли світло?</string>
+    <string name="widget_desc">Чи є світло за вашою адресою — за графіком ДПЕМ</string>
+    <string name="pick_address">Оберіть адресу</string>
+    <string name="pick_hint">Натисніть, щоб відкрити застосунок</string>
+    <string name="bar_desc">Графік на добу</string>
+    <string name="channel_name">Відключення світла</string>
+    <string name="channel_desc">Попередження на початку перемикання — приблизно за 30 хв до відключення</string>
+</resources>

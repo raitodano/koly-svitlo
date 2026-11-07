@@ -8,3 +8,9 @@ site/
 *.spec
 build.log
 tools/icon.ico
+# Android
+.gradle/
+local.properties
+*.jks
+*.keystore
+*.apk

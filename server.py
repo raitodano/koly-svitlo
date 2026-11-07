@@ -84,6 +84,16 @@ CACHE = DataCache()
 
 
 class Handler(SimpleHTTPRequestHandler):
+    # на Windows типи з реєстру бувають дивні (.js як text/plain) — задаємо явно
+    extensions_map = {
+        **SimpleHTTPRequestHandler.extensions_map,
+        ".js": "text/javascript; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
+        ".webmanifest": "application/manifest+json",
+        ".css": "text/css; charset=utf-8",
+        ".png": "image/png",
+    }
+
     def do_GET(self):  # noqa: N802
         url = urlparse(self.path)
         if url.path == "/api/data":

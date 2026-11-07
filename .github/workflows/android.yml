@@ -1,0 +1,75 @@
+# Збирає KolySvitlo.apk (віджет + сповіщення для Android) і додає до релізу GitHub.
+# Тег v* → APK у релізі поруч з KolySvitlo.exe. Гілка android-* → лише пробна збірка (артефакт).
+name: Android (APK)
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["android-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+      # Постійний ключ підпису — із секретів репозиторію (тоді нова версія ставиться поверх старої).
+      # Без секретів APK підписується тимчасовим debug-ключем.
+      - name: Ключ підпису
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "KS_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Немає секрету ANDROID_KEYSTORE_B64 — APK підписано тимчасовим ключем"
+          fi
+      - name: Зібрати APK
+        env:
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.$GITHUB_RUN_NUMBER"; fi
+          IFS=. read -r A B C <<< "$V"
+          CODE=$(( A * 10000 + B * 100 + ${C:-0} ))
+          gradle -p android --no-daemon assembleRelease -PversionName="$V" -PversionCode="$CODE"
+          cp android/app/build/outputs/apk/release/app-release.apk KolySvitlo.apk
+          ls -l KolySvitlo.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KolySvitlo-apk
+          path: KolySvitlo.apk
+      - name: Додати до релізу
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        # реліз може створювати паралельна збірка exe — тому повтори; чернетку знімаємо
+        run: |
+          publish() {
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" KolySvitlo.apk --clobber &&
+                gh release edit "$TAG" --draft=false
+            else
+              gh release create "$TAG" KolySvitlo.apk \
+                --title "Коли світло? $TAG" --notes-file .github/release-notes.md
+            fi
+          }
+          for attempt in 1 2 3 4 5; do
+            publish && exit 0
+            echo "Спроба $attempt не вдалася, повтор за $((attempt * 20)) с"
+            sleep $((attempt * 20))
+          done
+          exit 1

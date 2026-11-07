@@ -1,0 +1,16 @@
+{
+  "name": "Коли світло? — графік відключень",
+  "short_name": "Коли світло?",
+  "description": "Пошук черги погодинних відключень ДПЕМ ПрАТ «Атомсервіс» за адресою",
+  "lang": "uk",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#16171b",
+  "theme_color": "#16171b",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
