@@ -15,7 +15,8 @@ class SchedTest {
         val row = IntArray(48) { if (it in 8..15) 2 else 0 }.also { it[8] = 1; it[15] = 3 }
         val data = (0 until 12).flatMap { q -> row.map { if (q == 3) it else 0 } }
         val vals = data.joinToString(",") { "\"$it\"" }
-        return """<script>var x = 1; var records = [ {"date":"2026-11-07","saved_at":"2026-11-06 19:02:03","data":[$vals]},
+        // перед справжнім масивом — порожній «records = []», як буває на сторінці ДПЕМ
+        return """<script>var records = []; function f(){ return [1]; }; var x = 1; records = [ {"date":"2026-11-07","saved_at":"2026-11-06 19:02:03","data":[$vals]},
             {"date":"2026-11-07","saved_at":"2026-11-06 10:00:00","data":[]} ]; render(records);</script>"""
     }
 
@@ -31,7 +32,9 @@ class SchedTest {
         assertEquals(8, w[0].from)
         assertEquals(16, w[0].to)
         assertTrue("вікно починається з помаранчевої півгодинки", w[0].startsWithSwitch)
-        assertEquals("off", Sched.status(d.rows["2-ІІ"], 9 * 60).cls)
+        assertEquals("off", Sched.status(d.rows["2-ІІ"], 5 * 60).cls)
+        assertEquals("до 08:00", Sched.status(d.rows["2-ІІ"], 5 * 60).small)
+        assertEquals("on", Sched.status(d.rows["2-ІІ"], 9 * 60).cls)
         assertEquals("on", Sched.status(d.rows["2-ІІ"], 3 * 60).cls)
         assertEquals("вимкнення о 04:00", Sched.status(d.rows["2-ІІ"], 3 * 60).small)
         assertEquals("Світла немає", Sched.combined(d, listOf("1-І", "2-ІІ"), 5 * 60).big)

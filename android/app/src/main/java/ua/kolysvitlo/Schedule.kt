@@ -42,8 +42,9 @@ object Sched {
 
     /** Масив `records = [...]` зі сторінки ДПЕМ (шукаємо вручну, без важкого regex на 1,5 МБ). */
     fun parseRecords(page: String): List<Day> {
-        val head = Regex("""\brecords\s*=\s*\[""").find(page) ?: error("на сторінці ДПЕМ немає графіка")
-        val start = head.range.last
+        // саме «records = [ {» (як у dpem.py): на сторінці трапляються й інші «records = [...]»
+        val head = Regex("""\brecords\s*=\s*(\[)\s*\{""").find(page) ?: error("на сторінці ДПЕМ немає графіка")
+        val start = head.groups[1]!!.range.first
         var i = start
         var end = -1
         while (true) {
