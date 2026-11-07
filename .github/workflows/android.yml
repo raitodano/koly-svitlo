@@ -44,7 +44,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.$GITHUB_RUN_NUMBER"; fi
           IFS=. read -r A B C <<< "$V"
           CODE=$(( A * 10000 + B * 100 + ${C:-0} ))
-          gradle -p android --no-daemon assembleRelease -PversionName="$V" -PversionCode="$CODE"
+          gradle -p android --no-daemon testDebugUnitTest assembleRelease -PversionName="$V" -PversionCode="$CODE"
           cp android/app/build/outputs/apk/release/app-release.apk KolySvitlo.apk
           ls -l KolySvitlo.apk
       - uses: actions/upload-artifact@v4

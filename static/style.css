@@ -515,7 +515,7 @@ body.view-personal #districts, body.view-personal .overview { display: none !imp
 .wg-preview { margin-top: 12px; border-radius: 18px; padding: 14px 16px; display: grid; gap: 4px; box-shadow: 0 6px 20px rgba(0, 0, 0, .18); }
 .wg-preview.on { background: var(--lit); color: var(--on-lit); }
 .wg-preview.off { background: var(--dark); color: var(--dark-ink); }
-.wg-preview.maybe { background: repeating-linear-gradient(135deg, var(--maybe-b) 0 9px, color-mix(in srgb, var(--maybe-b) 70%, var(--card)) 9px 18px); color: var(--on-lit); }
+.wg-preview.maybe { background: var(--maybe-b); color: var(--on-lit); box-shadow: inset 6px 0 0 var(--maybe-a), 0 6px 20px rgba(0, 0, 0, .18); }
 .wg-preview.unknown { background: var(--nodata); color: var(--ink); }
 .wg-preview .wg-addr { font: 600 13px var(--display); opacity: .85; text-transform: uppercase; letter-spacing: .04em; }
 .wg-preview .wg-big { font: 700 26px/1.05 var(--display); }

@@ -1209,12 +1209,13 @@ function renderDistricts() {
 const WIDGET_KEY = 'gpv.widget';
 const APK_URL = 'https://github.com/raitodano/koly-svitlo/releases/latest/download/KolySvitlo.apk';
 const SCRIPTABLE_URL = 'scriptable/KolySvitlo.js';
-const APP = window.KolySvitloApp || null; // міст з Android-застосунку «Коли світло?»
+const bridge = () => window.KolySvitloApp || null; // міст з Android-застосунку «Коли світло?»
 state.widget = readJson(WIDGET_KEY, null);
 
 function appState() {
-  if (!APP) return null;
-  try { return JSON.parse(APP.getState()); } catch { return null; }
+  const app = bridge();
+  if (!app) return null;
+  try { return JSON.parse(app.getState()); } catch { return null; }
 }
 
 /** Адреси, які можна поставити у віджет: поточний пошук, «Мої адреси», історія. */
@@ -1540,8 +1541,8 @@ document.addEventListener('change', (ev) => {
     renderWidgetBox();
     return;
   }
-  if ((t.id === 'app-notify' || t.id === 'app-maybe') && APP) {
-    APP.setNotify($('#app-notify').checked, $('#app-maybe').checked);
+  if ((t.id === 'app-notify' || t.id === 'app-maybe') && bridge()) {
+    bridge().setNotify($('#app-notify').checked, $('#app-maybe').checked);
     setTimeout(renderWidgetBox, 600); // застосунок міг спитати дозвіл на сповіщення
   }
 });
@@ -1556,12 +1557,12 @@ document.addEventListener('click', (ev) => {
     else selectText($('#wg-param'));
     return;
   }
-  if (t.closest('[data-app-set]') && APP && state.widget) {
-    APP.setAddress(JSON.stringify(state.widget));
+  if (t.closest('[data-app-set]') && bridge() && state.widget) {
+    bridge().setAddress(JSON.stringify(state.widget));
     setTimeout(renderWidgetBox, 300);
     return;
   }
-  if (t.closest('[data-app-perm]') && APP) APP.openPermissions();
+  if (t.closest('[data-app-perm]') && bridge()) bridge().openPermissions();
 });
 
 function selectText(el) {

@@ -47,4 +47,6 @@ android {
 
 dependencies {
     implementation("androidx.work:work-runtime:2.10.0")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303") // справжній org.json замість заглушки android.jar
 }
