@@ -455,12 +455,12 @@ h2 { font: 700 18px var(--display); text-transform: uppercase; letter-spacing: .
 /* ================= Персоналізація ================= */
 body.view-personal .sync, body.view-personal #notice, body.view-personal #results,
 body.view-personal #districts, body.view-personal .overview { display: none !important; }
-.personal { margin-top: 18px; display: grid; gap: 26px; }
+.personal { margin-top: 18px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 26px; }
 .pers-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .pers-head h2 { font-size: 24px; }
 .back { border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 8px 13px; cursor: pointer; font: 600 14px var(--display); text-transform: uppercase; letter-spacing: .04em; }
 .back:hover { border-color: var(--ink); }
-.pers-sec { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px 18px; }
+.pers-sec { min-width: 0; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px 18px; }
 .pers-sec > h3 { margin: 0 0 4px; font: 700 18px var(--display); text-transform: uppercase; letter-spacing: .04em; }
 .pers-sec > p.lead { margin: 0 0 14px; color: var(--muted); font-size: 14px; }
 
@@ -564,7 +564,7 @@ body.view-personal #districts, body.view-personal .overview { display: none !imp
 @media (max-width: 700px) {
   .pers-toggle span { display: none; }
   .pers-toggle { padding: 0; width: 38px; justify-content: center; }
-  .wg-grid { grid-template-columns: 1fr; }
+  .wg-grid { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 520px) {
   .mast-tools { gap: 8px; }
