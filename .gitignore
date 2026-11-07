@@ -9,6 +9,7 @@ site/
 build.log
 tools/icon.ico
 # Android
+keys/
 .gradle/
 local.properties
 *.jks

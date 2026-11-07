@@ -24,22 +24,27 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.11.1"
-      # Постійний ключ підпису — із секретів репозиторію (тоді нова версія ставиться поверх старої).
-      # Без секретів APK підписується тимчасовим debug-ключем.
+      # Постійний ключ підпису (тоді нова версія ставиться поверх старої): зашифрований
+      # android/release-key.p12.enc + пароль із секрету ANDROID_KEYSTORE_PASS.
+      # Без секрету — лише пробна збірка з debug-ключем; реліз без постійного ключа не публікуємо.
       - name: Ключ підпису
         env:
-          KS_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
         run: |
-          if [ -n "$KS_B64" ]; then
-            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
-            echo "KS_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          if [ -n "$KS_PASS" ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in android/release-key.p12.enc \
+              -out "$RUNNER_TEMP/release.p12" -pass env:KS_PASS
+            echo "KS_FILE=$RUNNER_TEMP/release.p12" >> "$GITHUB_ENV"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "::error::Немає секрету ANDROID_KEYSTORE_PASS — APK для релізу має бути підписаний постійним ключем"
+            exit 1
           else
-            echo "::warning::Немає секрету ANDROID_KEYSTORE_B64 — APK підписано тимчасовим ключем"
+            echo "::warning::Немає секрету ANDROID_KEYSTORE_PASS — пробний APK підписано тимчасовим ключем"
           fi
       - name: Зібрати APK
         env:
           KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
-          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KS_ALIAS: kolysvitlo
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.$GITHUB_RUN_NUMBER"; fi
           IFS=. read -r A B C <<< "$V"
@@ -47,6 +52,16 @@ jobs:
           gradle -p android --no-daemon testDebugUnitTest assembleRelease -PversionName="$V" -PversionCode="$CODE"
           cp android/app/build/outputs/apk/release/app-release.apk KolySvitlo.apk
           ls -l KolySvitlo.apk
+      - name: Перевірити підпис
+        env:
+          # відбиток сертифіката постійного ключа (публічний, див. keys/ПРОЧТИ.txt у автора)
+          EXPECTED: a6255ac62130c0a640a6be51b00d60febbbe7aad8f3098b191ff82baf2f5ffaf
+        run: |
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          "$BT/apksigner" verify --print-certs KolySvitlo.apk | tee certs.txt
+          if [[ "$GITHUB_REF" == refs/tags/v* ]] && ! grep -qi "SHA-256 digest: $EXPECTED" certs.txt; then
+            echo "::error::APK підписано не постійним ключем"; exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: KolySvitlo-apk

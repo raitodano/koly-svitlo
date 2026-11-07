@@ -3,7 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Ключ підпису береться зі змінних середовища (секрети GitHub Actions); без них — debug-ключ.
+// Постійний ключ підпису: android/release-key.p12.enc, розшифровує GitHub Actions паролем із
+// секрету ANDROID_KEYSTORE_PASS і передає шлях у KS_FILE. Без нього — debug-ключ (лише для проб).
 val ksFile: String? = System.getenv("KS_FILE")
 
 android {
@@ -22,8 +23,9 @@ android {
         if (ksFile != null) {
             create("release") {
                 storeFile = file(ksFile)
+                storeType = "pkcs12"
                 storePassword = System.getenv("KS_PASS")
-                keyAlias = System.getenv("KS_ALIAS")
+                keyAlias = System.getenv("KS_ALIAS") ?: "kolysvitlo"
                 keyPassword = System.getenv("KS_PASS")
             }
         }
